@@ -1,0 +1,40 @@
+# Throwaway probe for the guard walls.yml relies on before merging unattended:
+# the pull request must change limits-observed.json and nothing else. It runs
+# between two scratch branches and never touches main.
+name: guard probe
+on:
+  push:
+    branches: [probe/head3]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Check the guard the way the walls workflow checks it
+        run: |
+          set -uo pipefail
+          topic="probe/topic-${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$topic"
+          node -e 'const f="limits-observed.json";const j=JSON.parse(require("fs").readFileSync(f,"utf8"));j.models["big-pickle"].servedTokens=999001;require("fs").writeFileSync(f,JSON.stringify(j,null,2)+"\n")'
+          git add limits-observed.json
+          git commit -m "chore: probe the single-file guard"
+          git push -u origin "$topic"
+          gh pr create --title "probe: the single-file guard" --body "Between two scratch branches. Not a change to main." --base probe/base3 --head "$topic"
+          paths=$(gh pr view "$topic" --json files --jq '[.files[].path] | join(",")')
+          echo "guard saw: [$paths]"
+          if [ "$paths" = "limits-observed.json" ]; then echo "GUARD: MERGE"; else echo "GUARD: HOLD"; fi
+          merged=no
+          for attempt in 1 2 3 4; do
+            if gh pr merge "$topic" --squash; then merged=yes; break; fi
+            sleep 5
+          done
+          echo "merged=$merged"
+          gh pr view "$topic" --json state,mergedAt --jq '"state=\(.state) mergedAt=\(.mergedAt)"'
+          git push origin --delete "$topic" >/dev/null 2>&1 && echo "branch deleted"
