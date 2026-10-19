@@ -1,0 +1,40 @@
+# Throwaway probe: can GITHUB_TOKEN open a pull request and merge it, the way
+# walls.yml would? It runs entirely between two scratch branches and never
+# touches main. Both scratch branches are deleted after the run.
+name: merge probe
+on:
+  push:
+    branches: [probe/head]
+permissions:
+  contents: write
+  pull-requests: write
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - name: Open a pull request and merge it
+        run: |
+          set -uo pipefail
+          topic="probe/topic-${GITHUB_RUN_ID}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$topic"
+          mkdir -p probe
+          echo "opened by run ${GITHUB_RUN_ID}" > probe/note.txt
+          git add probe/note.txt
+          git commit -m "chore: probe the merge path"
+          git push -u origin "$topic"
+          gh pr create --title "probe: the merge path" --body "A probe between two scratch branches. Not a change to main." --base probe/base --head "$topic"
+          echo "created=$?"
+          merged=no
+          for attempt in 1 2 3 4; do
+            if gh pr merge "$topic" --squash; then merged=yes; break; fi
+            echo "attempt $attempt: not mergeable yet"
+            sleep 5
+          done
+          echo "merged=$merged"
+          gh pr view "$topic" --json state,mergedAt,mergeCommit --jq '"state=\(.state) mergedAt=\(.mergedAt) commit=\(.mergeCommit.oid[0:7])"'
+          git push origin --delete "$topic" && echo "branch deleted"
