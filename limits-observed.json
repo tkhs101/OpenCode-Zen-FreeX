@@ -62,6 +62,14 @@
       "wall": "bracketed",
       "at": "2026-10-19"
     },
+    "minimax-m3.1-flash-free": {
+      "servedTokens": 898459,
+      "servedChars": 4200000,
+      "refusedChars": null,
+      "refusedSizes": [],
+      "wall": "openEnded",
+      "at": "2026-10-19"
+    },
     "nemotron-3.5-lightning-free": {
       "servedTokens": 599561,
       "servedChars": 2800000,
