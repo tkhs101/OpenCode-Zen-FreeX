@@ -33,3 +33,5 @@ jobs:
           gh pr merge "$topic" --squash || echo "merge refused"
           gh pr view "$topic" --json state,mergedAt --jq '"state=\(.state) mergedAt=\(.mergedAt)"'
           git push origin --delete "$topic" >/dev/null 2>&1 && echo "branch deleted"
+
+# re-run the probe: the workflow file is on both sides now
