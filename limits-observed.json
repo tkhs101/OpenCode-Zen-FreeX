@@ -2,12 +2,15 @@
   "version": 1,
   "models": {
     "beam-free": {
-      "servedTokens": 598923,
-      "servedChars": 2800000,
-      "refusedChars": null,
-      "refusedSizes": [],
-      "wall": "openEnded",
-      "at": "2026-10-19"
+      "servedTokens": 897797,
+      "servedChars": 4200000,
+      "refusedChars": 5200000,
+      "refusedSizes": [
+        5200000
+      ],
+      "wall": "named",
+      "named": 1048576,
+      "at": "2026-10-20"
     },
     "big-pickle": {
       "servedTokens": 343131,
@@ -44,12 +47,12 @@
       "at": "2026-10-19"
     },
     "longcat-2.5-preview-free": {
-      "servedTokens": 599264,
-      "servedChars": 2800000,
+      "servedTokens": 898133,
+      "servedChars": 4200000,
       "refusedChars": null,
       "refusedSizes": [],
       "wall": "openEnded",
-      "at": "2026-10-19"
+      "at": "2026-10-20"
     },
     "mimo-v2.6-flash-free": {
       "servedTokens": 343131,
@@ -63,12 +66,15 @@
       "at": "2026-10-19"
     },
     "minimax-m3.1-flash-free": {
-      "servedTokens": 898459,
-      "servedChars": 4200000,
-      "refusedChars": null,
-      "refusedSizes": [],
-      "wall": "openEnded",
-      "at": "2026-10-19"
+      "servedTokens": 1045199,
+      "servedChars": 4887500,
+      "refusedChars": 4950000,
+      "refusedSizes": [
+        4950000,
+        5200000
+      ],
+      "wall": "bracketed",
+      "at": "2026-10-20"
     },
     "nemotron-3.5-lightning-free": {
       "servedTokens": 599561,
@@ -79,12 +85,12 @@
       "at": "2026-10-19"
     },
     "nemotron-3.5-super-vl-free": {
-      "servedTokens": 599561,
-      "servedChars": 2800000,
+      "servedTokens": 898427,
+      "servedChars": 4200000,
       "refusedChars": null,
       "refusedSizes": [],
       "wall": "openEnded",
-      "at": "2026-10-19"
+      "at": "2026-10-20"
     },
     "space-bunny-free": {
       "servedTokens": 599516,
