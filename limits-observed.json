@@ -2,57 +2,65 @@
   "version": 1,
   "models": {
     "big-pickle": {
-      "servedTokens": 343131,
-      "servedChars": 1600000,
-      "refusedChars": 2200000,
+      "servedTokens": 375142,
+      "servedChars": 1750000,
+      "refusedChars": 1787500,
       "refusedSizes": [
+        1787500,
+        1825000,
+        1900000,
         2200000,
         2800000
       ],
       "wall": "bracketed",
-      "at": "2026-10-19"
+      "at": "2026-10-20"
     },
     "deepseek-v4.1-flash-free": {
-      "servedTokens": 323254,
+      "servedTokens": 323241,
       "servedChars": 1506250,
       "refusedChars": 1525000,
       "refusedSizes": [
         1525000,
-        1600000,
-        2800000
+        1600000
       ],
       "wall": "bracketed",
-      "at": "2026-10-19"
+      "at": "2026-10-20"
     },
     "glm-5.3-flash-free": {
-      "servedTokens": 215041,
-      "servedChars": 1000000,
-      "refusedChars": 1600000,
+      "servedTokens": 323107,
+      "servedChars": 1506250,
+      "refusedChars": 1525000,
       "refusedSizes": [
-        1600000,
-        2800000
+        1525000,
+        1600000
       ],
       "wall": "bracketed",
-      "at": "2026-10-19"
+      "at": "2026-10-20"
     },
     "mimo-v2.6-flash-free": {
-      "servedTokens": 343131,
-      "servedChars": 1600000,
-      "refusedChars": 2200000,
+      "servedTokens": 375142,
+      "servedChars": 1750000,
+      "refusedChars": 1787500,
       "refusedSizes": [
+        1787500,
+        1825000,
+        1900000,
         2200000,
         2800000
       ],
       "wall": "bracketed",
-      "at": "2026-10-19"
+      "at": "2026-10-20"
     },
     "nemotron-3.5-lightning-free": {
-      "servedTokens": 599561,
+      "servedTokens": 599550,
       "servedChars": 2800000,
-      "refusedChars": null,
-      "refusedSizes": [],
-      "wall": "openEnded",
-      "at": "2026-10-19"
+      "refusedChars": 4200000,
+      "refusedSizes": [
+        4200000
+      ],
+      "wall": "named",
+      "named": 1000000,
+      "at": "2026-10-20"
     }
   }
 }
