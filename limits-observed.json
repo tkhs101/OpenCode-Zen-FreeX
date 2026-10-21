@@ -35,6 +35,14 @@
       "wall": "bracketed",
       "at": "2026-10-20"
     },
+    "flint-40b-free": {
+      "servedTokens": 214959,
+      "servedChars": 1000000,
+      "refusedChars": null,
+      "refusedSizes": [],
+      "wall": "openEnded",
+      "at": "2026-10-21"
+    },
     "glm-5.3-flash-free": {
       "servedTokens": 323107,
       "servedChars": 1506250,
