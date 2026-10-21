@@ -6,7 +6,8 @@
     "refusedChars": "characters",
     "refusedSizes": "characters",
     "named": "tokens",
-    "at": "date, YYYY-MM-DD"
+    "at": "date, YYYY-MM-DD",
+    "unavailable": "date, YYYY-MM-DD"
   },
   "models": {
     "big-pickle": {
