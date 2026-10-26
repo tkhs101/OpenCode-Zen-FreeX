@@ -1627,12 +1627,16 @@ async function server(_input, options = {}) {
             // made from what it said — the IP-abuse wording is what makes a 429
             // not worth retrying.
             const attempt = async () => {
+              // Headers first: `attemptHeaders` tells the first attempt from a
+              // retry by `attempts`, and a counter that moved first made every
+              // attempt a retry.
+              const headers = attemptHeaders();
               attempts += 1;
               let response;
               try {
                 response = await fetch(upstreamEndpoint(baseURL, protocol), {
                   method: "POST",
-                  headers: attemptHeaders(),
+                  headers,
                   body: encoded,
                   signal: request.signal,
                   redirect: "error",

@@ -2027,6 +2027,56 @@ test("a retry keeps a project id the host named itself", async (t) => {
     assert.equal(call.headers["x-opencode-project"], "host-named-project");
 });
 
+// Under `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` the first attempt of a request
+// carries the session the conversation is keyed to, and only a retry mints a
+// new one. The first attempt was told apart by `attempts === 0`, but the counter
+// moved before the headers were built, so the branch never matched: the id
+// `sessionID()` chose was thrown away and a retry re-minted a session nothing
+// had spent.
+test("an affinity session is kept on the first attempt and only a retry mints a new one", async (t) => {
+  const held = process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY;
+  process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY = "1";
+  t.after(() => {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY;
+    else process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY = held;
+  });
+  const { plugin, state, origin } = await fixture(t);
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  const send = () =>
+    loader.fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "x-session-id": "affinity-conversation" },
+      body: JSON.stringify({ model: "chat-free", messages: [{ role: "user", content: "hello" }] }),
+    });
+  await (await send()).text();
+  await (await send()).text();
+  const inference = state.calls.filter((call) => call.url === "/v1/chat/completions");
+  assert.equal(inference.length, 2);
+  assert.equal(
+    inference[0].headers["x-opencode-session"],
+    inference[1].headers["x-opencode-session"],
+    "two turns of one conversation share the session affinity keeps for it",
+  );
+  // The retry is the one attempt that must not reuse it: the tier files what it
+  // thinks of this traffic against the session, and the refused one is spent.
+  state.statuses = [429, 200];
+  const retried = await send();
+  assert.equal(retried.status, 200);
+  await retried.text();
+  const [first, retry] = state.calls.filter((call) => call.url === "/v1/chat/completions").slice(-2);
+  assert.equal(
+    first.headers["x-opencode-session"],
+    inference[0].headers["x-opencode-session"],
+    "the retried request's first attempt still opens under the conversation's session",
+  );
+  assert.notEqual(
+    retry.headers["x-opencode-session"],
+    first.headers["x-opencode-session"],
+    "the retry asks under a session nothing has spent",
+  );
+});
+
 // A 429 whose body names abuse of the egress is a block, and no project id
 // answers a block. Retrying one would spend the caller's patience and the
 // route's budget to arrive at the same refusal.
