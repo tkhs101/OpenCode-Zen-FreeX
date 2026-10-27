@@ -36,7 +36,7 @@ magpie plugin login opencode-zen-free
 
 密钥填 `public`。这是 Zen 免费层的共享凭据，不需要个人 API key——填别的也会被丢掉。
 
-个人 key 请加到 magpie 内置的 OpenCode Zen provider，那里支持多把 key 的轮换与故障转移。凭据保存在 OpenCode 的 `auth.json` 或 magpie 的 `plugin-auth.json`。
+个人 key 请加到 magpie 内置的 OpenCode Zen provider，那里支持多把 key 的切换与故障转移。凭据保存在 OpenCode 的 `auth.json` 或 magpie 的 `plugin-auth.json`。
 
 ## 模型
 
@@ -53,12 +53,12 @@ magpie plugin login opencode-zen-free
 
 请求发往 `https://opencode.ai/inference/v1`，按每个模型的原生协议走（Chat Completions / Responses / Anthropic Messages），流式与普通 JSON 都支持。
 
-- **只借 OpenCode 的外壳**：请求头、User-Agent、系统提示词与完整工具集合配套为现行的 2.x 一代 OpenCode（1.x 通道已于 2026-10-25 被免费层退役；被退役的通道不是换 IP 或改措辞能救的）。官方提示词放在宿主自己的系统指令之前；正文里已经带着它就不再动，重复整形不会注入两遍。提示词到环境块为止，不点名任何内建 skill——宿主没有 OpenCode 的内建 skill 可加载。请求还必须**从 Bun 运行时发出**，与官方客户端一致：magpie 用自带的 Bun 跑插件，本插件正是借此通过。请求头是刻意挑出的最小集合——**不要自行添加**，两个各自无害的头组合起来也会被拒。
+- **只借 OpenCode 的外壳**：请求头、User-Agent、系统提示词与完整工具集合配套为现行的 2.x 一代 OpenCode（1.x 通道已于 2026-10-25 被免费层退役；被退役的通道不是改措辞能救的）。官方提示词放在宿主自己的系统指令之前；正文里已经带着它就不再动，重复整形不会注入两遍。提示词到环境块为止，不点名任何内建 skill——宿主没有 OpenCode 的内建 skill 可加载。请求还必须**从 Bun 运行时发出**，与官方客户端一致：magpie 用自带的 Bun 跑插件，本插件正是借此通过。请求头是刻意挑出的最小集合——**不要自行添加**，两个各自无害的头组合起来也会被拒。
 - **宿主的工具照常运行**：每个工具保留自己的措辞与参数，但以 `clint_` 前缀的名字上路，不会与随后附上的官方工具集合相撞。请求里对它的每一处引用一并改名，回复里的名字再翻译回宿主声明的原名；宿主不会见到自己没声明的名字。OpenCode 自家的工具以采集到的完整形态发送——并且由于官方提示词教的是 Code Mode，提示词后会追加一段 `<system-reminder>`，点名本宿主真正可调的 `clint_` 工具，模型不会开局就调 `execute` 撞上 unknown tool。
 - **工具名对不上就原样交给宿主**：先精确匹配，再忽略大小写，最后忽略 `_`/`-`/`.`/空白，只取唯一结果；对不上或有歧义时不猜、不丢，由宿主回自己的「没有这个工具」，模型据此改名重试。只有没有名字的调用会被略去，并在正文说明。
 - **每个请求自成会话**：每个请求都新铸一枚 OpenCode 形状的会话 id——时间戳取当前时刻，永远落在上游接受的窗口内。Zen 把它对流量的记忆记在会话上，新会话不带旧账。设 `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` 可回到按会话保持（宿主给的 OpenCode 形状 id 原样传，否则从宿主的会话标识派生并记住，同一会话各轮共用一个 id）。
-- **项目 id 也是自己的**：免费额度按「项目 id × 出口」记账——同一 id 换出口、或同一出口换 id，都是一本新账（2026-10-26 实测）。宿主给了项目 id 就用它的；没给则每请求随机生成一枚 git-hash 形状的专属 id——旧默认 `global` 是全世界蹭免费插件共享的桶，热门出口上早已被烧光。
-- **429 会换一本账再问一次**：既然额度按「项目 id × 出口」记账，被烧穿的桶就不是被烧穿的出口。宿主遇到 429 会结束整轮并报告额度耗尽，所以插件在把它交出去之前，换一枚没花过的项目 id 与会话 id、把同样的字节再发一次。默认重试 2 次，首次等 1.2 秒、逐次翻倍（`OPENCODE_ZEN_FREE_RETRY_429=0` 关闭，`OPENCODE_ZEN_FREE_RETRY_WAIT_MS` 调等待，两者都在下一个请求就生效）。只重试 429：403 是指纹或 IP、426 是版本、5xx 是端点故障，换 id 都救不了；正文点名出口滥用的 429 也不重试，因为没有哪个 id 能救一个被封的 IP。宿主自己命名的项目 id 每次都用它——那是宿主对自己的陈述，不该为了绕开限流而改写。重试用尽后交出去的，仍是 Zen 自己那条 429，原样未改。
+- **项目 id 也是自己的**：免费额度按「项目 id × 出口」记账——id 与出口任意一边不同，都是一本新账（2026-10-26 实测）。宿主给了项目 id 就用它的；没给则每请求随机生成一枚 git-hash 形状的专属 id——旧默认 `global` 是全世界蹭免费插件共享的桶，热门出口上早已被烧光。
+- **429 会换一本账再问一次**：既然额度按「项目 id × 出口」记账，被烧穿的桶就不是被烧穿的出口。宿主遇到 429 会结束整轮并报告额度耗尽，所以插件在把它交出去之前，换一枚没花过的项目 id 与会话 id、把同样的字节再发一次。默认重试 2 次，首次等 1.2 秒、逐次翻倍（`OPENCODE_ZEN_FREE_RETRY_429=0` 关闭，`OPENCODE_ZEN_FREE_RETRY_WAIT_MS` 与 `OPENCODE_ZEN_FREE_RETRY_WAIT_MAX_MS` 调等待与封顶，都在下一个请求就生效）。默认值刻意偏短：多数宿主身后没有值得等待的东西，桶烧光后再等只是把同一句拒绝延后。**出口会轮换的部署**（同一请求在出口变了之后能成功）才该把首次等待与封顶一起抬到盖过轮换耗时。只重试 429：403 是指纹或出口、426 是版本、5xx 是端点故障，换 id 都救不了；正文点名出口滥用的 429 也不重试，因为没有哪个 id 能救一个被封的出口。宿主自己命名的项目 id 每次都用它——那是宿主对自己的陈述，不该为了绕开限流而改写。重试用尽后交出去的，仍是 Zen 自己那条 429，原样未改。
 - **截断与错误如实报告**：流提前结束时，Chat 流若有内容且无未完成调用，按截断回答收尾并注明；其余情况一律失败。错误正文只读一小段找 Zen 自陈的上限，其余替换为说明。
 
 <details>
@@ -86,10 +86,10 @@ bun run capture             # 确认差异后才写入
 
 | 现象 | 处理 |
 | --- | --- |
-| 每个请求都是 `403 FreeTierError`，正文没有 IP 封禁文案 | 采集的 OpenCode 形态过期。升级插件；在仓库副本里跑 `bun run check:gate`，全被拒时重新采集指纹，并从同一发行版刷新提示词与工具资产 |
-| `403` 正文是封禁文案（`abuse of traffic`，或 `free models aren't available … from your current network`） | 免费层封的是当前出口 IP。换网络、换 VPN 出口，或等封禁解除；重试与改请求都无用 |
+| 每个请求都是 `403 FreeTierError`，正文没有出口封禁文案 | 采集的 OpenCode 形态过期。升级插件；在仓库副本里跑 `bun run check:gate`，全被拒时重新采集指纹，并从同一发行版刷新提示词与工具资产 |
+| `403` 正文是封禁文案（`abuse of traffic`，或 `free models aren't available … from your current network`） | 免费层封的是当前出口。等封禁解除；重试与改请求都无用 |
 | `426 Upgrade Required` | 这个包自称的 OpenCode 版本比 Zen 要的旧。升级插件，或在更新的 OpenCode 里运行 |
-| `429`，且宿主因此结束整轮、报「额度已用尽」 | 先确认重试没被关掉（`OPENCODE_ZEN_FREE_RETRY_429` 不能是 `0`）。插件已换新账本重试过仍被拒，说明这个出口上的额度确实用尽：换出口，或稍后再试。若正文是出口封禁文案，见上面 `403` 那行 — 被 IP 封时插件按设计不重试 |
+| `429`，且宿主因此结束整轮、报「额度已用尽」 | 先确认重试没被关掉（`OPENCODE_ZEN_FREE_RETRY_429` 不能是 `0`）。插件已换新账本重试过仍被拒，说明这个出口上的额度确实用尽：稍后再试。若正文是出口封禁文案，见上面 `403` 那行 — 出口被封时插件按设计不重试 |
 | `404 … not available as an OpenCode Zen free model now` | 该模型已不再免费。从报错列出的模型里换一个 |
 | `Model is not an available free model for this protocol` | 请求发出时列表变了。让宿主刷新模型列表再试 |
 | `uses the public credential` | 存的密钥不是 `public`。用 `public` 重新登录 |
@@ -110,6 +110,7 @@ bun run capture             # 确认差异后才写入
 | `OPENCODE_ZEN_FREE_SESSION_AFFINITY` | `1` 恢复按会话保持，不再每请求新铸会话 id |
 | `OPENCODE_ZEN_FREE_RETRY_429` | 429 的重试次数，默认 `2`；`0` 关闭 |
 | `OPENCODE_ZEN_FREE_RETRY_WAIT_MS` | 首次重试前等待的毫秒数，默认 `1200`，逐次翻倍 |
+| `OPENCODE_ZEN_FREE_RETRY_WAIT_MAX_MS` | 等待封顶，默认 `5000`；出口会轮换的部署把它调过轮换耗时 |
 | `OPENCODE_ZEN_FREE_LIMITS_SNAPSHOT` | 实测快照路径；空字符串表示不读快照 |
 | `OPENCODE_ZEN_FREE_LIMITS_SNAPSHOT_URL` | 远程快照地址；空字符串关闭远程 |
 | `OPENCODE_ZEN_FREE_LIMITS_STATE` | 学习到的上限状态路径；空字符串表示只在内存中 |

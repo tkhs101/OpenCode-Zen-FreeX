@@ -581,12 +581,25 @@ function looksLikeTransportFailure(error, signal) {
 //
 // `OPENCODE_ZEN_FREE_RETRY_429=0` turns it off, and the wait is bounded in both
 // directions so a misconfigured value cannot make a caller wait for minutes.
+//
+// The defaults are deliberately short. This package is distributed, and most
+// hosts have nothing behind a 429 that a longer wait would reach: the bucket is
+// spent and waiting only postpones the same answer. A deployment that DOES have
+// something behind it — a rotating egress, for instance, where the request can
+// succeed once the exit changes — needs a wait long enough to cover that
+// rotation, and that number belongs to the deployment, not to this package. So
+// both the first wait and the ceiling are settable, and the defaults stay where
+// a plain host wants them.
 const RETRY_429_ENV = "OPENCODE_ZEN_FREE_RETRY_429";
 const RETRY_WAIT_ENV = "OPENCODE_ZEN_FREE_RETRY_WAIT_MS";
+const RETRY_WAIT_MAX_ENV = "OPENCODE_ZEN_FREE_RETRY_WAIT_MAX_MS";
 const RETRY_429_DEFAULT = 2;
 const RETRY_WAIT_DEFAULT_MS = 1200;
 const RETRY_WAIT_MIN_MS = 100;
-const RETRY_WAIT_MAX_MS = 5000;
+const RETRY_WAIT_MAX_DEFAULT_MS = 5000;
+// The ceiling a deployment may set. High enough to cover a slow egress rotation
+// (tens of seconds) but not so high that a typo parks a caller for an hour.
+const RETRY_WAIT_MAX_LIMIT_MS = 120_000;
 const RETRY_429_MAX = 5;
 
 // A whole number inside a range, or the fallback. The same rule limits.mjs
@@ -616,9 +629,24 @@ export function retry429Count(raw = globalThis.process?.env?.[RETRY_429_ENV]) {
 export function retryWaitMs(raw = globalThis.process?.env?.[RETRY_WAIT_ENV]) {
   return retrySetting(raw, {
     min: RETRY_WAIT_MIN_MS,
-    max: RETRY_WAIT_MAX_MS,
+    max: RETRY_WAIT_MAX_LIMIT_MS,
     fallback: RETRY_WAIT_DEFAULT_MS,
   });
+}
+
+// The ceiling the doubling stops at. A host with a rotating egress sets this
+// above the rotation's own duration so a later attempt lands after the exit has
+// changed; everything else keeps the short default. It is floored at the first
+// wait, so a ceiling below the starting delay cannot make the second wait
+// shorter than the first.
+export function retryWaitCeilingMs(raw = globalThis.process?.env?.[RETRY_WAIT_MAX_ENV]) {
+  const floor = retryWaitMs();
+  const ceiling = retrySetting(raw, {
+    min: RETRY_WAIT_MIN_MS,
+    max: RETRY_WAIT_MAX_LIMIT_MS,
+    fallback: RETRY_WAIT_MAX_DEFAULT_MS,
+  });
+  return Math.max(ceiling, floor);
 }
 
 // Wait, and stop waiting the moment the caller gives up. A retry is a delay the
@@ -1650,6 +1678,7 @@ async function server(_input, options = {}) {
             // budget.
             let result = await attempt();
             const retries = retry429Count();
+            const waitCeiling = retryWaitCeilingMs();
             let wait = retryWaitMs();
             for (let tried = 0; tried < retries; tried += 1) {
               const quota =
@@ -1663,7 +1692,7 @@ async function server(_input, options = {}) {
                 break;
               request.signal.throwIfAborted();
               await pause(wait, request.signal);
-              wait = Math.min(wait * 2, RETRY_WAIT_MAX_MS);
+              wait = Math.min(wait * 2, waitCeiling);
               result = await attempt();
             }
             // A connection that never came up is the caller's to see, and it is

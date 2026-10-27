@@ -1,6 +1,6 @@
 {
   "name": "opencode-zen-freex",
-  "version": "0.5.11",
+  "version": "0.5.12",
   "description": "OpenCode Zen's free models, for hosts that are not OpenCode: the public credential, automatic discovery and native streaming protocols",
   "type": "module",
   "main": "./index.mjs",

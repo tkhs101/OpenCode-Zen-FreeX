@@ -2071,6 +2071,40 @@ test("the 429 retry can be turned off", async (t) => {
   assert.equal(inference.length, 1);
 });
 
+// The defaults are what a host with nothing behind a 429 wants: two retries,
+// a short wait, and the refusal soon after. A deployment that does have
+// something behind it — a rotating exit, where the same request succeeds once
+// the egress changes — needs the wait to outlast that rotation, and that number
+// belongs to the deployment. Both the first wait and the ceiling are settable,
+// and neither default moves for everyone else.
+test("the retry wait and its ceiling are settable, and the defaults stay short", async () => {
+  const { retryWaitMs, retryWaitCeilingMs, retry429Count } = await import("./provider.mjs");
+  // Defaults: unchanged, and short enough that a plain host is not parked.
+  assert.equal(retry429Count(undefined), 2);
+  assert.equal(retryWaitMs(undefined), 1200);
+  assert.equal(retryWaitCeilingMs(undefined), 5000);
+  // A deployment with a rotation behind it says so, and gets waits that reach it.
+  assert.equal(retryWaitMs("5000"), 5000);
+  assert.equal(retryWaitCeilingMs("30000"), 30000);
+  // The ceiling never falls below the first wait, whatever the two variables say
+  // relative to each other — otherwise the second wait would be shorter than the
+  // first and the backoff would not be one.
+  const held = process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS;
+  process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS = "20000";
+  try {
+    assert.ok(
+      retryWaitCeilingMs("1000") >= 20000,
+      "a ceiling below the first wait was allowed to shorten the backoff",
+    );
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS;
+    else process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS = held;
+  }
+  // Out-of-range values fall back rather than reaching the timer.
+  assert.equal(retryWaitMs("999999999"), 1200);
+  assert.equal(retryWaitCeilingMs("999999999"), 5000);
+});
+
 // A request that never gets an answer is a different failure from a refusal, and
 // it used to end the turn: a fetch that throws produces no Response, so the 429
 // branch never saw it and the exception went straight to the host, which reports
