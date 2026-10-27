@@ -1037,8 +1037,8 @@ project id, the same CLI under a brand-new project id answered 200 — and a
 random 40-hex id in the plugin's own shape answered 200 from a spent exit
 twice. The old default, `global`, is the id every freeriding plugin user's
 traffic carries, so its buckets on popular exits arrive pre-burned: that is
-how a freshly rotated exit answered 429 twenty-one seconds after its first
-use (2026-10-25, Miami). A host that names its project — by header or with a
+how a popular exit answered 429 twenty-one seconds after this deployment first
+used it (2026-10-25, Miami). A host that names its project — by header or with a
 git one magpie hands over — keeps its own name; a host that does not gets a
 git-hash-shaped id of its own per request (`randomProjectID` in
 `provider.mjs`), a ledger no other traffic shares wherever the request lands.
@@ -1060,17 +1060,18 @@ session ids, one answer: 429 "Free usage limit reached". Our own spend on
 that IP in the minutes between the passing probe and the first refusal was
 ~10k tokens, so the exhaustion was the world's, not ours. The same morning a
 death spiral on another exit produced thirty such fresh-id refusals over
-7.5 minutes (tiny probes on a just-rotated-to exit passed in the same
+7.5 minutes (tiny probes on another exit passed in the same
 minutes). So the model that fits both measurements is a min of two budgets:
 the per-(id, egress) ledger the retry can reset, and a per-egress budget it
 cannot. On popular VPN exits the egress budget is what answers, and the only
-fixes are a new egress or time. Measuring this takes real-size requests: a
+fix is time. Measuring this takes real-size requests: a
 probe the size of the admission ping sees the per-id ledger and misses the
 ceiling entirely. How deep the per-id ledger itself goes is bounded from
 below, not measured: one fixed project id served ~15M tokens on
 2026-10-27 without a single refusal — ~2.3M on one exit, then ~12.7M more
-spread across seventeen exits over ~75 minutes (rotating every few requests
-so the egress budget could not answer for it; ~115k-token requests at
+spread across seventeen exits over ~75 minutes (each exit freshly admitted
+and carrying only a few requests, so the egress budget could not answer for
+it; ~115k-token requests at
 ~400k tokens/min, the tens-of-millions question asked and answered). If an
 id-level total cap exists it is larger than that, or the ledger refills at
 least that fast — so in practice the egress budget is almost always the one

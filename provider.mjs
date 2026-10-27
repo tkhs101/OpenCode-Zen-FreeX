@@ -514,8 +514,8 @@ function looksLikeTransientQuota(status, text) {
 // Whether a request that never got an answer is worth asking again.
 //
 // This is a different failure from the one above and it was missing: a fetch
-// that throws — the egress is being switched, the proxy is momentarily bound to
-// a port nothing listens on, DNS is not up yet — never produces a Response, so
+// that throws — the proxy is momentarily bound to a port nothing listens on,
+// DNS is not up yet — never produces a Response, so
 // the 429 branch never sees it and the exception went straight to the host. A
 // host reports that as a quota failure (measured 2026-10-27: `dial tcp
 // 127.0.0.1:1: connection refused` arrived at dsh as `429 … QUOTA`), and the
@@ -585,11 +585,10 @@ function looksLikeTransportFailure(error, signal) {
 // The defaults are deliberately short. This package is distributed, and most
 // hosts have nothing behind a 429 that a longer wait would reach: the bucket is
 // spent and waiting only postpones the same answer. A deployment that DOES have
-// something behind it — a rotating egress, for instance, where the request can
-// succeed once the exit changes — needs a wait long enough to cover that
-// rotation, and that number belongs to the deployment, not to this package. So
-// both the first wait and the ceiling are settable, and the defaults stay where
-// a plain host wants them.
+// something behind one — something only a longer wait can reach — needs a wait
+// long enough to reach it, and that number belongs to the deployment, not to
+// this package. So both the first wait and the ceiling are settable, and the
+// defaults stay where a plain host wants them.
 const RETRY_429_ENV = "OPENCODE_ZEN_FREE_RETRY_429";
 const RETRY_WAIT_ENV = "OPENCODE_ZEN_FREE_RETRY_WAIT_MS";
 const RETRY_WAIT_MAX_ENV = "OPENCODE_ZEN_FREE_RETRY_WAIT_MAX_MS";
@@ -597,8 +596,9 @@ const RETRY_429_DEFAULT = 2;
 const RETRY_WAIT_DEFAULT_MS = 1200;
 const RETRY_WAIT_MIN_MS = 100;
 const RETRY_WAIT_MAX_DEFAULT_MS = 5000;
-// The ceiling a deployment may set. High enough to cover a slow egress rotation
-// (tens of seconds) but not so high that a typo parks a caller for an hour.
+// The ceiling a deployment may set. High enough to cover the long waits a
+// deployment may genuinely need (tens of seconds), but not so high that a typo
+// parks a caller for an hour.
 const RETRY_WAIT_MAX_LIMIT_MS = 120_000;
 const RETRY_429_MAX = 5;
 
@@ -634,9 +634,9 @@ export function retryWaitMs(raw = globalThis.process?.env?.[RETRY_WAIT_ENV]) {
   });
 }
 
-// The ceiling the doubling stops at. A host with a rotating egress sets this
-// above the rotation's own duration so a later attempt lands after the exit has
-// changed; everything else keeps the short default. It is floored at the first
+// The ceiling the doubling stops at. A deployment whose 429 clears on its own
+// clock sets this above that clock, so a later attempt lands after it does;
+// everything else keeps the short default. It is floored at the first
 // wait, so a ceiling below the starting delay cannot make the second wait
 // shorter than the first.
 export function retryWaitCeilingMs(raw = globalThis.process?.env?.[RETRY_WAIT_MAX_ENV]) {
@@ -1611,8 +1611,9 @@ async function server(_input, options = {}) {
                   // on a fresh exit answers (both measured 2026-10-26). The old
                   // default `global` is shared by every freeriding plugin user
                   // on the planet, so its buckets on popular exits arrive
-                  // pre-burned — a rotated-to exit once answered 429 twenty-one
-                  // seconds after its first use. A host that names its project
+                  // pre-burned — a popular exit once answered 429 twenty-one
+                  // seconds after this deployment first used it. A host that
+                  // names its project
                   // keeps its own name; one that does not gets an id of its
                   // own for the request, in the git-hash shape the CLI sends.
                   hostProject ||
@@ -1644,7 +1645,7 @@ async function server(_input, options = {}) {
               } catch (cause) {
                 // A request that never got an answer has no Response to judge,
                 // so the failure travels to the loop as one instead of ending the
-                // turn here: the egress may be mid-switch, and the retry asks
+                // turn here: the proxy may be mid-restart, and the retry asks
                 // again once it settles. A caller's own abort is not a failure to
                 // retry, and `looksLikeTransportFailure` says so by refusing it.
                 return { failed: cause };
@@ -1669,7 +1670,7 @@ async function server(_input, options = {}) {
             // Two failures are worth asking again about, and they are different
             // questions. A 429 may be one spent bucket rather than a spent exit,
             // and a fresh project id is a ledger nothing has drawn on. A request
-            // that never got an answer — the egress mid-switch, the proxy bound
+            // that never got an answer — the proxy bound
             // to a port nothing listens on — says nothing about the request at
             // all, and the same bytes answered once the path settles. Both are
             // retried here, the first by re-minting the ids and the second by

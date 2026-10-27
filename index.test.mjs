@@ -469,7 +469,7 @@ async function fixture(t, input = {}, serverOptions = {}) {
     } else if (state.destroyInference) {
       // The socket dies before a byte of the answer is written: fetch rejects
       // with the runtime's own transport error rather than resolving a
-      // Response, which is what an egress that is mid-switch produces.
+      // Response, which is what a proxy mid-restart produces.
       req.socket.destroy();
     } else if (state.body !== undefined) {
       res.writeHead(state.status ?? 403, { "content-type": "application/json", ...upstreamHeaders() });
@@ -2123,8 +2123,8 @@ test("the 429 retry can be turned off", async (t) => {
 
 // The defaults are what a host with nothing behind a 429 wants: two retries,
 // a short wait, and the refusal soon after. A deployment that does have
-// something behind it — a rotating exit, where the same request succeeds once
-// the egress changes — needs the wait to outlast that rotation, and that number
+// something behind one — something only a longer wait can reach — needs the
+// wait to reach it, and that number
 // belongs to the deployment. Both the first wait and the ceiling are settable,
 // and neither default moves for everyone else.
 test("the retry wait and its ceiling are settable, and the defaults stay short", async () => {
@@ -2133,7 +2133,7 @@ test("the retry wait and its ceiling are settable, and the defaults stay short",
   assert.equal(retry429Count(undefined), 2);
   assert.equal(retryWaitMs(undefined), 1200);
   assert.equal(retryWaitCeilingMs(undefined), 5000);
-  // A deployment with a rotation behind it says so, and gets waits that reach it.
+  // A deployment with a longer wait to spend says so, and gets waits that reach it.
   assert.equal(retryWaitMs("5000"), 5000);
   assert.equal(retryWaitCeilingMs("30000"), 30000);
   // The ceiling never falls below the first wait, whatever the two variables say
@@ -2158,8 +2158,8 @@ test("the retry wait and its ceiling are settable, and the defaults stay short",
 // A request that never gets an answer is a different failure from a refusal, and
 // it used to end the turn: a fetch that throws produces no Response, so the 429
 // branch never saw it and the exception went straight to the host, which reports
-// it as a quota failure. Measured 2026-10-27, an egress mid-switch answered dsh
-// with `429 … QUOTA` for `dial tcp 127.0.0.1:1: connection refused` — a request
+// it as a quota failure. Measured 2026-10-27, dsh reported
+// `429 … QUOTA` for `dial tcp 127.0.0.1:1: connection refused` — a request
 // that never left the machine, and a turn lost to a path that came back four
 // seconds later. What is pinned here is that the loop spends its retries before
 // handing the failure on: the waits alone are longer than the bound below.
@@ -2168,7 +2168,7 @@ test("a connection that never came up is retried before the failure is handed on
   await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
   const loader = await plugin.auth.loader(publicAuth);
   // The socket dies before any header is written, which surfaces as a thrown
-  // `fetch failed` rather than a Response — the shape an egress mid-switch
+  // `fetch failed` rather than a Response — the shape a proxy mid-restart
   // produces. The fixture's discovery paths still answer, so the model is known
   // and the request is built and sent.
   state.destroyInference = true;
