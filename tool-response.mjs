@@ -36,8 +36,18 @@ function failure(protocol, message, stream = false, code = "upstream_error") {
 
 // The sentence a client is given for an upstream failure, on both arms: a
 // guarded stream and a whole reply are the same failure to the client, and a
-// second copy of the wording is a second thing to keep in step.
-const UPSTREAM_FAILED = "Upstream request failed";
+// second copy of the wording is a second thing to keep in step. It says what
+// the client did not get — the stream ended before the reply was complete —
+// and not what failed inside this package: a host decides whether asking again
+// can help from that shape, and DeepSeek Harness, for one, reads "stream ended
+// before|without" as a transport failure and retries it, while the bare
+// "Upstream request failed" fell outside every class its retry policy names.
+// The guard's own truncation failures say the same thing in the same words —
+// "stream ended before|without" — so a host reads every cut stream as one
+// shape, whether the transport raised it or the guard found it at EOF. The
+// cause stays in the server's log.
+const UPSTREAM_FAILED =
+  "Upstream request failed: the stream ended before the reply was complete";
 
 // Whether a failure is the client's own request stopping. An abort reaches an
 // arm as an `AbortError`, or as the code a Node stream raises when the signal
@@ -1713,7 +1723,8 @@ async function* framesFrom(reader) {
           throw new GuardError("Invalid UTF-8 in upstream SSE event");
         }
         const frame = frameOf([...lines, line], [...rawLines, line]);
-        if (!wholeEvent(frame.text)) throw new GuardError("Upstream SSE ended inside an event");
+        if (!wholeEvent(frame.text))
+          throw new GuardError("Upstream SSE stream ended before an event was complete");
         yield frame;
         return;
       }
@@ -1945,7 +1956,7 @@ function guardedStream(response, protocol, checkName, endCutShort) {
                   chat?.size ? "a tool call unfinished" : "",
                 ].filter(Boolean);
                 throw new GuardError(
-                  `Upstream SSE ended without a completion marker (${came.join(", ")})`,
+                  `Upstream SSE stream ended without a completion marker (${came.join(", ")})`,
                 );
               }
               stopped = true;
@@ -2078,11 +2089,11 @@ function guardedStream(response, protocol, checkName, endCutShort) {
               return;
             }
             // The client is told in the shape every other failure is told in,
-            // and what it is told says nothing about the failure: the text of
-            // an internal one (a transport error, a TypeError from the guard's
-            // own code) is the server's business, and a client that reads it
-            // learns the inside of this package for nothing. The raw failure
-            // goes to the server's own log, where it belongs.
+            // and what it is told says nothing about the failure's cause: the
+            // text of an internal one (a transport error, a TypeError from the
+            // guard's own code) is the server's business, and a client that
+            // reads it learns the inside of this package for nothing. The raw
+            // failure goes to the server's own log, where it belongs.
             logFailure(error);
             controller.enqueue(
               encoder.encode(
@@ -2168,11 +2179,11 @@ export async function guardToolResponse(response, protocol, policy, options = {}
       // over as it came, and it is not the failure the rule below is about.
       if (aborted(error)) throw error;
       // The client is told in the shape every other failure is told in, and
-      // what it is told says nothing about the failure: the text of an internal
-      // one (a transport error, a TypeError from the guard's own code) is the
-      // server's business, and a client that reads it learns the inside of this
-      // package for nothing. The raw failure goes to the server's own log,
-      // where it belongs.
+      // what it is told says nothing about the failure's cause: the text of an
+      // internal one (a transport error, a TypeError from the guard's own
+      // code) is the server's business, and a client that reads it learns the
+      // inside of this package for nothing. The raw failure goes to the
+      // server's own log, where it belongs.
       logFailure(error);
       status = 502;
       value = failure(protocol, UPSTREAM_FAILED, false, "upstream_error");

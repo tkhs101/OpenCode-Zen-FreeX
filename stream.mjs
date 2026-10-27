@@ -1249,7 +1249,7 @@ export async function collapseResponse(response, protocol) {
       reader.releaseLock();
     }
   }
-  if (!failure && !completed) failure = "Upstream SSE ended without a completion marker";
+  if (!failure && !completed) failure = "Upstream SSE stream ended without a completion marker";
   let body;
   if (!failure) {
     try {

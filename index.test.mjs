@@ -3199,7 +3199,10 @@ test("a Chat stream Zen closes before its [DONE] ends cut short for a streaming 
   assert.doesNotMatch(text, /"error"/);
   const whole = await send(false);
   assert.notEqual(whole.status, 200);
-  assert.match(await whole.text(), /without a completion marker \(reply x2, 3 events/);
+  assert.match(
+    await whole.text(),
+    /Upstream SSE stream ended without a completion marker \(reply x2, 3 events/,
+  );
 });
 
 // A refusal is the one place this route states its own window, and the plugin

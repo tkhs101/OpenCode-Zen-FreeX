@@ -1001,8 +1001,8 @@ for (const protocol of protocols) {
     assertError(protocol, last);
     assert.match(
       last.message ?? last.error?.message ?? "",
-      /ended inside an event/,
-      `${protocol}: the failure does not say the stream was cut inside an event`,
+      /stream ended before an event was complete/,
+      `${protocol}: the failure does not say the stream was cut before an event was complete`,
     );
   });
 
@@ -1049,6 +1049,47 @@ for (const protocol of protocols) {
       `the server's log did not keep the raw failure: ${logged.join(" | ")}`,
     );
     assert.equal(source.body.locked, false);
+  });
+
+  // The sentence a host reads is the one it decides from. The transport error
+  // behind it stays in the server's log, so the sentence itself has to say
+  // what the client did not get: the stream ended before the reply was
+  // complete. DeepSeek Harness reads that shape as a transport failure and
+  // asks again; "Upstream request failed" alone fell outside every class its
+  // retry policy names, so the turn ended there. Both arms say the same
+  // sentence: a host that reads a stream and one that reads a whole reply are
+  // told the same thing about the same failure.
+  test(`${protocol}: an upstream failure says the stream ended before the reply was complete`, async () => {
+    const sentence =
+      "Upstream request failed: the stream ended before the reply was complete";
+    const cause = new TypeError("upstream aborted");
+    const streamed = failingBody(cause);
+    const { value: text } = await withLog(async () =>
+      (await guardToolResponse(streamed.response, protocol, policy)).text(),
+    );
+    const last = parse(text).at(-1).data;
+    assertError(protocol, last);
+    assert.equal(
+      last.message ?? last.error?.message,
+      sentence,
+      `${protocol}: the streamed failure does not carry the sentence a host retries on`,
+    );
+    // The phrase, not just the fact of a failure, is what a host keys on: a
+    // rewording that loses it puts the turn back where it was.
+    assert.match(last.message ?? last.error?.message, /stream ended (?:before|without)\b/i);
+
+    const whole = failingBody(cause, () => {}, "application/json");
+    const { value: response } = await withLog(() =>
+      guardToolResponse(whole.response, protocol, policy),
+    );
+    assert.equal(response.status, 502);
+    const body = await response.json();
+    assertError(protocol, body, false);
+    assert.equal(
+      body.message ?? body.error?.message,
+      sentence,
+      `${protocol}: the whole-reply failure says something else about the same failure`,
+    );
   });
 
   // The other kind of failure that is not the guard's own: the client asked
@@ -3296,7 +3337,7 @@ test("chat: an empty tool_calls delta is not a tool call", async () => {
   const cut = event(chat({ content: "hi" })) + event(chat({ tool_calls: [] }));
   const blamed = await (await guardToolResponse(sse(cut), "chat", policy)).text();
   assert.doesNotMatch(blamed, /a tool call unfinished/);
-  assert.match(blamed, /ended without a completion marker/);
+  assert.match(blamed, /stream ended without a completion marker/);
 });
 
 test("chat: the note follows the text the model wrote before its call", async () => {
@@ -4483,7 +4524,7 @@ test("chat: a stream cut short still fails with a call pending, saying nothing, 
     assert.doesNotMatch(JSON.stringify(frames), /comm/);
     const data = frames.at(-1).data;
     assertError("chat", data);
-    assert.match(data.error.message, /^Upstream SSE ended without a completion marker \(/);
+    assert.match(data.error.message, /^Upstream SSE stream ended without a completion marker \(/);
     assert.match(data.error.message, detail);
   }
 });
