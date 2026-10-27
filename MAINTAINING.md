@@ -1046,12 +1046,49 @@ The gate probes the same way (`tools-smoke.mjs`), or it would report a
 wording refusal where the truth is a spent `global` bucket. Nothing is known
 to read the id beyond its shape.
 
-**Handing a 429 on when a new ledger would have answered.** The measurement
-above is the whole reason the retry exists: a spent bucket is not a spent exit,
-so the same request under a fresh project id can answer 200 where it just
-answered 429. A host does not recover from a 429 on its own — DeepSeek Harness
-ends the turn and reports the quota as exhausted — so the plugin spends a
-retry before it hands the refusal on. Each attempt mints a project id and a
+**…but a saturated exit has no ledger to switch into.** The per-(id, egress)
+ledger is only visible while the egress itself has room. The `public`
+credential identifies no one, so nothing can be ledgered against it: the
+tier keys its limits to what does distinguish traffic — the egress IP, and
+beneath it the project id (the session carries its own memory of the
+traffic, but no quota is known to hang from it). The egress-level budget is
+spent by everyone routed through the same exit, which is most of what makes
+popular VPN exits pre-burned: on 2026-10-27 an exit whose admission probe
+had just answered 200 (a few-KB request) refused a ~32k-token request five
+times and then a ~5k one five more — ten fresh project ids, ten fresh
+session ids, one answer: 429 "Free usage limit reached". Our own spend on
+that IP in the minutes between the passing probe and the first refusal was
+~10k tokens, so the exhaustion was the world's, not ours. The same morning a
+death spiral on another exit produced thirty such fresh-id refusals over
+7.5 minutes (tiny probes on a just-rotated-to exit passed in the same
+minutes). So the model that fits both measurements is a min of two budgets:
+the per-(id, egress) ledger the retry can reset, and a per-egress budget it
+cannot. On popular VPN exits the egress budget is what answers, and the only
+fixes are a new egress or time. Measuring this takes real-size requests: a
+probe the size of the admission ping sees the per-id ledger and misses the
+ceiling entirely. How deep the per-id ledger itself goes is bounded from
+below, not measured: one fixed project id served ~15M tokens on
+2026-10-27 without a single refusal — ~2.3M on one exit, then ~12.7M more
+spread across seventeen exits over ~75 minutes (rotating every few requests
+so the egress budget could not answer for it; ~115k-token requests at
+~400k tokens/min, the tens-of-millions question asked and answered). If an
+id-level total cap exists it is larger than that, or the ledger refills at
+least that fast — so in practice the egress budget is almost always the one
+that answers first, and after a 429 the project and session ids do not need
+changing, only the egress does. (The plugin still mints fresh ones per
+request: that costs nothing and covers the case the measurements could not
+reach.)
+
+**Handing a 429 on when a new ledger would have answered.** The 2026-10-26
+measurement above is the whole reason the retry exists: a spent bucket is
+not a spent exit, so the same request under a fresh project id can answer
+200 where it just answered 429 — when the exit's aggregate has room for a
+new ledger. When it does not, the same retry buys nothing but a slower
+failure, and that is the case the defaults are tuned for: two tries, ~3.6s
+of waiting in total, so a saturated exit costs seconds rather than a turn.
+A host does not recover from a 429 on its own — DeepSeek Harness ends the
+turn and reports the quota as exhausted — so the plugin spends a retry
+before it hands the refusal on. Each attempt mints a project id and a
 session id nothing has spent and sends the same bytes (`attempt` in
 `provider.mjs`); the wait starts at `RETRY_WAIT_DEFAULT_MS` and doubles, and
 the whole thing is off with `OPENCODE_ZEN_FREE_RETRY_429=0`.
