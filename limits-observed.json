@@ -41,7 +41,8 @@
       "refusedChars": null,
       "refusedSizes": [],
       "wall": "openEnded",
-      "at": "2026-10-21"
+      "at": "2026-10-21",
+      "tried": "2026-10-28"
     },
     "glm-5.3-flash-free": {
       "servedTokens": 323107,
