@@ -1125,13 +1125,18 @@ const publicAuth = async () => ({ type: "api", key: "public" });
 // own: a cold process reads the snapshot once per server, which made a discovery
 // four reads where these cases assert three. The count they pin is how a flight
 // ends, and it must not depend on whether an earlier file happened to warm a
-// cache or on whether the network answered.
+// cache or on whether the network answered. `modelsSnapshotURL: ""` switches the
+// protocol snapshot's own read off for the same two reasons: it is one more
+// background fetch a cold server starts, and the floor it installs would change
+// which endpoint a discovery answers an id with — the exact answer these cases
+// read from the docs stub alone.
 const zenURLs = {
   baseURL: zenBase,
   catalogURL: zenCatalog,
   docsURL: zenDocs,
   modelsDevURL: null,
   limitsSnapshotURL: "",
+  modelsSnapshotURL: "",
 };
 
 // A macrotask boundary. The loader reaches its discovery through microtasks —

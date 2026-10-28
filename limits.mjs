@@ -1026,7 +1026,10 @@ const SAVE_DEBOUNCE_MS = 5000;
 // same one the state file is read under, and for the same reason — it is read by
 // a request path that must not be talked into a large read.
 const DEFAULT_SNAPSHOT_URL = new URL("./limits-observed.json", import.meta.url);
-const SNAPSHOT_LIMIT = 256 * 1024;
+// The document ceiling for every snapshot this package reads — the walls file
+// beside this module and the protocol file beside catalog.mjs alike. It is read
+// by a request path that must not be talked into a large read.
+export const SNAPSHOT_LIMIT = 256 * 1024;
 // The shape of the snapshot this build reads. A file that names another version
 // is a file written by a build that means something else by these rows.
 const SNAPSHOT_VERSION = 1;
@@ -2129,11 +2132,21 @@ function cancelSnapshotBody(response) {
 // an installed answer from an hour ago is a better snapshot than a bundled table
 // from a released build, and one bad fetch is not a reason to lose it. The cache
 // write is the last step and its failure does not undo a successful install.
+//
+// `parse` and `install` are the two halves this function is parameterised on.
+// The defaults are this file's walls snapshot; catalog.mjs passes its own pair,
+// and the contract both sides are held to is the one group visible here: parse
+// answers the parsed answer or undefined, install puts it in front of readers
+// and answers whether it took. Everything else — the bounds, the deadline, the
+// byte-capped read, the atomic cache write, the reasons returned — is one path
+// two kinds of document walk.
 export async function refreshSnapshot({
   url,
   cachePath,
   timeoutMs = SNAPSHOT_TIMEOUT_DEFAULT,
   fetchImpl = globalThis.fetch,
+  parse = parseSnapshotDocument,
+  install = installSnapshot,
 } = {}) {
   let target;
   try {
@@ -2183,12 +2196,12 @@ export async function refreshSnapshot({
       cancelSnapshotBody(response);
       return { ok: false, reason: "too-large" };
     }
-    const walls = parseSnapshotDocument(text);
-    if (!walls) return { ok: false, reason: "invalid" };
+    const parsed = parse(text);
+    if (!parsed) return { ok: false, reason: "invalid" };
     const fetchedAt = Date.now();
-    installSnapshot(walls, { source: "remote", fetchedAt, url: target.href });
+    install(parsed, { source: "remote", fetchedAt, url: target.href });
     if (typeof cachePath === "string" && cachePath !== "") await writeSnapshotCache(cachePath, text);
-    return { ok: true, fetchedAt, walls };
+    return { ok: true, fetchedAt, walls: parsed };
   } catch {
     // A response object that throws, a body that cannot be read, a header getter
     // that fails: all of it is the fetch failing, and none of it is the caller's.

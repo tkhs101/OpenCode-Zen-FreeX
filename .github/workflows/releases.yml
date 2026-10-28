@@ -1,0 +1,168 @@
+name: releases
+
+# The plugin presents itself as a captured OpenCode, and OpenCode keeps shipping
+# releases. `ci.yml`'s gate answers whether the capture still passes; this asks
+# the simpler question first — has a release shipped that is newer than what was
+# captured — and, when the answer is yes, opens the issue that asks for the loop
+# (`bun run check:gate`, then a capture if the floor answers nothing).
+#
+# It is a watcher, not an updater: nothing in this repository rewrites a
+# fingerprint on its own (see releases-watch.mjs for why). What a new release
+# means by itself is only that the floor may have moved, and that is a fact a
+# person acts on with the capture loop.
+on:
+  schedule:
+    # Daily, at 09:23 UTC — an off-the-hour minute, for the same reason the walls
+    # cron keeps one: every scheduled workflow in the world asks at :00. A daily
+    # cadence cannot miss a release by more than a day, and OpenCode's own
+    # release rhythm makes one ask a day the cheap reading of it.
+    - cron: "23 9 * * *"
+  workflow_dispatch:
+    inputs:
+      automatic:
+        description: A scheduler-triggered run; skip if a successful run happened in the last 23 hours
+        type: boolean
+        default: false
+
+# One watcher at a time, and none in the middle of another.
+concurrency:
+  group: releases
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.3
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - name: Is this a run the interval still needs?
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          AUTOMATIC: ${{ inputs.automatic == true && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$AUTOMATIC" != "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch: the interval guard is bypassed"
+            exit 0
+          fi
+          if [ "$EVENT" != "schedule" ] && [ "$EVENT" != "workflow_dispatch" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          set +e
+          last="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=releases.yml --status=success --limit 10 --json updatedAt --jq '([.[].updatedAt] | sort | last) // empty' 2>/dev/null)"
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ] || [ -z "$last" ]; then
+            echo "::warning title=Interval guard could not read runs::watching rather than skipping"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          age=$(( $(date -u +%s) - $(date -u -d "$last" +%s) ))
+          if [ "$age" -lt 82800 ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "the last successful releases run finished ${age}s ago; this trigger is a duplicate"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "the last successful releases run finished ${age}s ago"
+          fi
+
+  watch:
+    needs: guard
+    if: needs.guard.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    # The one thing it writes is the issue that asks for the loop.
+    permissions:
+      issues: write
+      contents: read
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: The pinned Bun is the one package.json declares
+        run: bun assert-bun-version.mjs "$BUN_VERSION"
+      # The watcher's own codes: 0 nothing new, 2 a newer release exists, 1 could
+      # not ask. Only "2" opens anything; "1" is a warning the summary carries,
+      # because a watcher that cannot ask must say so rather than exit green.
+      - name: Compare the newest release with the capture
+        id: watch
+        continue-on-error: true
+        run: |
+          set +e
+          set -o pipefail
+          bun releases-watch.mjs 2>&1 | tee releases-report.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      - name: Publish the report
+        if: always()
+        env:
+          OUTCOME: ${{ steps.watch.outcome }}
+          CODE: ${{ steps.watch.outputs.code }}
+        run: |
+          {
+            if [ -n "$CODE" ]; then
+              echo "## Release watcher — $OUTCOME (exit code $CODE)"
+            else
+              echo "## Release watcher — $OUTCOME"
+            fi
+            echo
+            echo "The report below quotes what the watcher printed; it is text from this branch and the releases feed, not interpreted."
+            echo
+            sed 's/^/    /' releases-report.txt 2>/dev/null || echo 'The run printed nothing, so it may never have asked.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # An issue per release cycle, one at a time: the title is fixed by shape
+      # rather than by version, so a watcher that cannot find an open one —
+      # because the last ask failed, or because the loop already ran and the
+      # issue was closed — opens the next one with the new version inside.
+      - name: Open the issue that asks for the loop
+        if: always() && steps.watch.outputs.code == '2'
+        run: |
+          set -euo pipefail
+          title="releases-watch: a newer OpenCode than the captured floor"
+          existing="$(gh issue list --state open --search "$title in:title" --json number,title --jq '.[0].number' 2>/dev/null)" || existing=""
+          if [ -n "$existing" ]; then
+            echo "::notice title=The issue is already open::Issue #$existing already asks for the loop; this run adds nothing."
+            exit 0
+          fi
+          body="$(mktemp)"
+          {
+            echo "The release watcher found an OpenCode release newer than the version the"
+            echo "capture in \`fingerprint.json\` was taken from. The floor may have moved under"
+            echo "the shipped fingerprint; that is a fact for the capture loop, not a bug."
+            echo
+            echo "Run, from a checkout, in this order:"
+            echo
+            echo '```sh'
+            echo 'bun run check:gate        # does the tier still answer the captured floor?'
+            echo 'bun run capture -- --dry  # what a fresh capture would change (nothing written)'
+            echo 'bun run capture           # after the dry run is read and agreed to'
+            echo '```'
+            echo
+            echo "The prompt and the tool assets are not part of what capture writes: they are"
+            echo "refreshed from the same release, by hand, alongside the profile (MAINTAINING.md"
+            echo "→ The loop). The watcher's own report is in the run summary that opened this"
+            echo "issue; the watcher does not change any file."
+          } > "$body"
+          gh issue create --title "$title" --body-file "$body" \
+            || echo "::warning title=Issue not opened::gh issue create failed; read the run summary for the report and act on it by hand."

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { opencodeID, realSessionID, sessionID } from "./provider.mjs";
+import { mintIdentity, opencodeID, realSessionID, sessionID } from "./provider.mjs";
 
 // This file pins the affinity ladder — how a conversation is named, and how one
 // name keeps one session across its turns. The package engages that ladder only
@@ -668,4 +668,33 @@ test("OPENCODE_ZEN_FREE_SESSION_AFFINITY=1 is what puts the ladder in charge", (
     if (saved === undefined) delete process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY;
     else process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY = saved;
   }
+});
+
+// The retry's replacement ledger is minted as one pair, not as two calls of two
+// clocks: the tier reads a session id and a project id as one conversation in
+// one project, so what replaces a spent pair is itself a pair — minted from one
+// reading of the clock, and replaced together the next time.
+test("a replacement ledger is minted as one pair", async () => {
+  const { mintIdentity } = await import("./provider.mjs");
+  const pair = mintIdentity();
+  assert.ok(realSessionID(pair.session), "the session half is one OpenCode could have minted");
+  assert.match(pair.project, /^[0-9a-f]{40}$/, "the project half is the git-hash shape the CLI sends");
+  // The two halves agree about when their request happened: both carry the
+  // clock the call was made at, which for the session id is the field the tier
+  // reads and for the project id is nothing at all — the pair is one action.
+  const now = Date.now();
+  const stamped = mintIdentity(now);
+  const decoded = decode(stamped.session, true);
+  assert.equal(
+    decoded.time,
+    // The field keeps 36 bits of the clock (2^36 ms of it, one wrap); the pair
+    // was minted from the reading this test handed in.
+    now % WRAP,
+    "the session half carries the clock the pair was minted from, not one it re-read",
+  );
+  assert.ok(decoded.counter > 0 && decoded.counter < MINT_LIMIT, `counter ${decoded.counter}`);
+  // Two pairs are two pairs: no half is shared, whatever the timing.
+  const other = mintIdentity(now);
+  assert.notEqual(stamped.session, other.session);
+  assert.notEqual(stamped.project, other.project);
 });

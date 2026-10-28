@@ -1,0 +1,371 @@
+name: catalog
+
+# The protocol table moves with the docs page it is read from, and a release
+# cut before it moves leaves its hosts on the shipped floor. `ci.yml`'s gate
+# notices that Zen has moved; this notices that the docs table — the place a
+# model's endpoint is read from — changed under a build that already shipped,
+# and publishes the new reading for the snapshot to pick up.
+#
+# It reports through a pull request rather than by committing, like the walls
+# workflow does. The snapshot is derived data — the parse models.mjs runs on
+# every discovery — and a value a scheduled job wrote on its own is a value
+# nobody has ever seen, which is one reason more to route it past a person.
+#
+# Unlike the walls workflow this spends nothing from Zen's free tier: it reads
+# one docs page from GitHub, so the hourly cadence costs seconds, not tokens.
+on:
+  schedule:
+    # Hourly, at :47 — off the walls cron's :17 and off :00, so no two scheduled
+    # workflows of this repository coincide.
+    - cron: "47 * * * *"
+  # Run it from the Actions page to find out whether it works right now. The
+  # `automatic` input exists for a deployment that drives this workflow from
+  # its own timer instead of trusting the best-effort cron; the guard below is
+  # the interval itself either way.
+  workflow_dispatch:
+    inputs:
+      automatic:
+        description: A scheduler-triggered run; skip if a successful run happened in the last 55 minutes
+        type: boolean
+        default: false
+
+# A scheduled run must not cancel the previous one halfway through a docs read,
+# and two of them must not write the rolling branch at once.
+concurrency:
+  group: catalog
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  BUN_VERSION: 1.4.3
+
+# The same interval guard the walls workflow runs, for the same reason GitHub
+# cron is best effort and a deployment may drive this with its own timer.
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - name: Is this a run the interval still needs?
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          AUTOMATIC: ${{ inputs.automatic == true && 'true' || 'false' }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "workflow_dispatch" ] && [ "$AUTOMATIC" != "true" ]; then
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "manual dispatch: the interval guard is bypassed"
+            exit 0
+          fi
+          if [ "$EVENT" != "schedule" ] && [ "$EVENT" != "workflow_dispatch" ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          # Fail open, as the walls guard does: an actions API that cannot be
+          # read must not stop the only refresh the snapshot has.
+          set +e
+          last="$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=catalog.yml --status=success --limit 30 --json updatedAt --jq '([.[].updatedAt] | sort | last) // empty' 2>/dev/null)"
+          code=$?
+          set -e
+          if [ "$code" -ne 0 ] || [ -z "$last" ]; then
+            echo "::warning title=Interval guard could not read runs::reading rather than skipping"
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          age=$(( $(date -u +%s) - $(date -u -d "$last" +%s) ))
+          if [ "$age" -lt 3300 ]; then
+            echo "run=false" >> "$GITHUB_OUTPUT"
+            echo "the last successful catalog run finished ${age}s ago; this trigger is a duplicate"
+          else
+            echo "run=true" >> "$GITHUB_OUTPUT"
+            echo "the last successful catalog run finished ${age}s ago"
+          fi
+
+  read:
+    needs: guard
+    if: needs.guard.outputs.run == 'true'
+    runs-on: ubuntu-latest
+    # The one write here is models-observed.json, on the rolling branch this
+    # workflow owns. Read-only everywhere else.
+    permissions:
+      contents: write
+      pull-requests: write
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      WALLS_AUTOMERGE: ${{ vars.WALLS_AUTOMERGE }}
+      DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+    steps:
+      # Pinned to the commit its version names, as every workflow in this
+      # repository does; a tag can be moved under a workflow that holds a token.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The snapshot is the default branch's, whatever ref the dispatch
+          # named — the same rule the walls measurement runs by.
+          ref: ${{ github.event.repository.default_branch }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+        with:
+          bun-version: ${{ env.BUN_VERSION }}
+      - name: The pinned Bun is the one package.json declares
+        run: bun assert-bun-version.mjs "$BUN_VERSION"
+      # A snapshot this build cannot read is a repository fault, and it must
+      # fail here rather than be folded into the read step's own failures — the
+      # same preflight the walls job runs before its survey.
+      - name: The snapshot is one the plugin can read
+        run: bun models-watch.mjs --check
+      # The read, and the write into the working tree. Allowed to fail, and the
+      # job is not: GitHub raw being unreachable is not this repository's fault.
+      # The exit code is preserved as an output because it carries the
+      # distinction the step colour cannot: 0 is a read that answered with a
+      # snapshot (written when it moved), 2 is a read that answered with
+      # nothing usable, and everything else is a page that could not be asked.
+      - name: Read the docs table
+        id: read
+        continue-on-error: true
+        run: |
+          set +e
+          set -o pipefail
+          bun models-watch.mjs --sweep --write 2>&1 | tee catalog-report.txt
+          code=${PIPESTATUS[0]}
+          set -e
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+          exit "$code"
+      - name: Publish the report
+        if: always()
+        env:
+          OUTCOME: ${{ steps.read.outcome }}
+          CODE: ${{ steps.read.outputs.code }}
+        run: |
+          {
+            if [ -n "$CODE" ]; then
+              echo "## Catalog survey — $OUTCOME (exit code $CODE)"
+            else
+              echo "## Catalog survey — $OUTCOME"
+            fi
+            echo
+            echo "The report below quotes what the survey printed; it is text from this branch and the docs page, not interpreted."
+            echo
+            sed 's/^/    /' catalog-report.txt 2>/dev/null || echo 'The run printed nothing, so it may never have asked.'
+          } >> "$GITHUB_STEP_SUMMARY"
+      # A read that could not be asked publishes nothing, whether the step
+      # never ran or answered with a failure. Code 2 is its own line: the page
+      # was read and named nothing usable, which is a silence worth a warning
+      # because a table whose shape changed looks exactly like it.
+      - name: Stop when the docs page was not usable
+        id: ready
+        if: always()
+        env:
+          CODE: ${{ steps.read.outputs.code }}
+        run: |
+          ready=false
+          if [ "$CODE" = "0" ]; then
+            ready=true
+          fi
+          echo "ready=$ready" >> "$GITHUB_OUTPUT"
+          if [ "$CODE" = "2" ]; then
+            echo "::warning title=The docs table named nothing this plugin asks::either the table is empty or its shape changed; nothing published."
+          elif [ "$ready" != "true" ]; then
+            echo "::warning title=Catalog survey did not read the docs page::exit code \`$CODE\`; nothing published."
+          fi
+      # Whether anything is to open: the file in the working tree has to differ
+      # from what the default branch already carries.
+      - name: Is there anything to show?
+        id: diff
+        if: steps.ready.outputs.ready == 'true'
+        run: |
+          if git diff --quiet -- models-observed.json; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing has moved, so there is nothing to open."
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git --no-pager diff --stat -- models-observed.json
+          fi
+      # The published document is re-validated before it leaves the working
+      # tree — the same rule the walls snapshot publishes under, and the only
+      # check a workflow-started pull request will ever get, since starting a
+      # workflow is not something a $GITHUB_TOKEN run can do.
+      - name: Is the reading publishable?
+        if: steps.ready.outputs.ready == 'true' && steps.diff.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          bun models-watch.mjs --check
+          bun test
+      # Branch, pull request, and — where the repository allows it — the merge,
+      # run exactly as the walls workflow runs its own; the guards there (the
+      # file list check before an unattended merge, the reusable pull request,
+      # the machine-owned fixed branch) carry over read for read.
+      - name: Open a pull request with the reading
+        id: open
+        if: steps.ready.outputs.ready == 'true' && steps.diff.outputs.changed == 'true'
+        run: |
+          set -euo pipefail
+          gh auth setup-git
+          branch="models/observed"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          reading="$(mktemp)"
+          cp models-observed.json "$reading"
+          git checkout -- models-observed.json
+          set +e
+          git ls-remote --exit-code --heads origin "$branch" >/dev/null 2>&1
+          remote_code=$?
+          set -e
+          if [ "$remote_code" -eq 0 ]; then
+            git fetch --depth=1 --no-tags origin "+refs/heads/$branch:refs/remotes/origin/$branch"
+            git checkout -B "$branch" "origin/$branch"
+          elif [ "$remote_code" -eq 2 ]; then
+            git checkout -B "$branch"
+          else
+            echo "::error title=Could not read the rolling branch::git ls-remote failed (status $remote_code); the reading was not published."
+            exit 1
+          fi
+          cp "$reading" models-observed.json
+          rm -f "$reading"
+          git add models-observed.json
+          if git diff --cached --quiet; then
+            echo "The rolling branch already carries exactly this reading, so there is no new commit."
+          else
+            git commit -m "chore: record the docs table read on $(date -u +%Y-%m-%d)"
+          fi
+          git push --force origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "compare=${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/compare/${DEFAULT_BRANCH}...${branch}?expand=1" >> "$GITHUB_OUTPUT"
+          {
+            echo "The scheduled catalog survey read the docs table on $(date -u +%Y-%m-%d) and found"
+            echo "something that is not what the snapshot records."
+            echo
+            echo "**What is in this pull request is the snapshot, and the snapshot is read.**"
+            echo "\`models-observed.json\` is an input at run time: for an id whose endpoint the docs"
+            echo "stopped naming — or when the docs themselves cannot be reached — this is the"
+            echo "endpoint a request for it is sent to. Merging is what publishes it."
+            echo
+            sed 's/^/    /' catalog-report.txt 2>/dev/null || echo '    The survey printed no report.'
+            echo
+            echo "The file is derived from the docs page, not measured: the parse it was written"
+            echo "with is the one models.mjs runs on every discovery, so the runtime and the"
+            echo "snapshot cannot disagree about a document both of them read."
+          } > pr-body.md
+          existing=""
+          set +e
+          existing="$(gh pr list --state open --head "$branch" --json number --jq '.[0].number')"
+          list_code=$?
+          set -e
+          if [ "$list_code" -ne 0 ]; then
+            echo "::warning title=Could not look for an existing pull request::gh pr list failed (status $list_code); the run will try to create one."
+            existing=""
+          fi
+          opened=false
+          number=""
+          if [ -n "$existing" ]; then
+            number="$existing"
+            echo "::notice title=Reusing the open pull request::Pull request #$number already has $branch as its head; this run updated that pull request."
+            opened=true
+          elif creation="$(gh pr create --title "catalog: the docs table moved on $(date -u +%Y-%m-%d)" --body-file pr-body.md --base "$DEFAULT_BRANCH" --head "$branch" 2>&1)"; then
+            opened=true
+            set +e
+            number="$(printf '%s' "$creation" | grep -oE '/pull/[0-9]+$' | tail -n 1 | grep -oE '[0-9]+$')"
+            set -e
+            if [ -n "$number" ]; then
+              echo "::notice title=Pull request opened::Pull request #$number carries $branch."
+            else
+              echo "::warning title=Could not read the new pull request number::gh pr create succeeded but its output did not name a pull request; the branch was pushed and the pull request was left for a person."
+            fi
+          else
+            echo "::warning title=Pull request not opened::gh pr create failed ($(printf '%s' "$creation" | tail -n 1)), so the branch was pushed and no pull request was made. Open it from the link in the run summary. If the message names Actions permissions, allow them under Settings > Actions > General > Workflow permissions."
+          fi
+          echo "opened=$opened" >> "$GITHUB_OUTPUT"
+          merged=false
+          if [ "$WALLS_AUTOMERGE" = "off" ]; then
+            echo "::notice title=Merge left to a person::WALLS_AUTOMERGE is off for this repository, so the pull request was left open."
+          elif [ "$opened" = "true" ] && [ -n "$number" ]; then
+            paths=""
+            set +e
+            paths="$(gh pr view "$number" --json files --jq '[.files[].path] | join(",")' 2>/dev/null)"
+            view_code=$?
+            set -e
+            if [ "$view_code" -ne 0 ]; then
+              echo "::warning title=Could not read the pull request files::gh pr view #$number failed (status $view_code), so the pull request was left for a person."
+              paths=""
+            fi
+            if [ -z "$paths" ]; then
+              echo "::warning title=Not merged automatically::The files changed by pull request #$number could not be read, so it was left for a person."
+            elif [ "$paths" = "models-observed.json" ]; then
+              merge_state=""
+              for attempt in 1 2 3 4; do
+                merge_output=""
+                set +e
+                merge_output="$(gh pr merge "$number" --squash 2>&1)"
+                merge_code=$?
+                set -e
+                if [ "$merge_code" -ne 0 ]; then
+                  echo "::notice title=Merge not accepted yet::attempt $attempt of 4: $(printf '%s' "$merge_output" | tail -n 1)"
+                  sleep 5
+                  continue
+                fi
+                merge_state="unreadable"
+                set +e
+                merge_state="$(gh pr view "$number" --json state,mergedAt --jq 'if .state == "MERGED" and .mergedAt != null then "merged" else "not-merged" end' 2>/dev/null)"
+                state_code=$?
+                set -e
+                if [ "$state_code" -eq 0 ] && [ "$merge_state" = "merged" ]; then
+                  merged=true
+                elif [ "$state_code" -eq 0 ]; then
+                  merge_state="queued"
+                else
+                  echo "::warning title=Could not read the pull request state::gh pr view #$number failed (status $state_code); the run will not claim a merge it cannot see."
+                fi
+                break
+              done
+              if [ "$merged" = "true" ]; then
+                git push origin --delete "$branch" >/dev/null 2>&1 || true
+              elif [ "$merge_state" = "queued" ]; then
+                echo "::warning title=Not merged automatically::The merge of #$number was accepted but the pull request is not merged yet; it may be queued behind branch protection. The branch and the pull request were left in place."
+              else
+                echo "::warning title=Not merged automatically::The pull request #$number could not be merged by this run; it was left open. Merge it from the run summary."
+              fi
+            else
+              echo "::warning title=Not merged automatically::This pull request changes $paths, which is more than models-observed.json, so the run left it for a person."
+            fi
+          fi
+          echo "merged=$merged" >> "$GITHUB_OUTPUT"
+      - name: Where the reading is
+        if: always() && steps.ready.outputs.ready == 'true' && steps.diff.outputs.changed == 'true'
+        env:
+          MERGED: ${{ steps.open.outputs.merged }}
+          OPENED: ${{ steps.open.outputs.opened }}
+          OUTCOME: ${{ steps.open.outcome }}
+          BRANCH: ${{ steps.open.outputs.branch }}
+          COMPARE: ${{ steps.open.outputs.compare }}
+        run: |
+          {
+            echo
+            echo "## Where the reading is"
+            echo
+            if [ "$MERGED" = "true" ]; then
+              echo "This run's reading was merged to \`main\`: the rolling branch \`$BRANCH\` was"
+              echo "updated, its pull request checked to be the snapshot and nothing else,"
+              echo "squashed, and the branch deleted."
+            elif [ "$OUTCOME" != "success" ]; then
+              echo "Nothing was published: the publish step did not finish successfully"
+              echo "(outcome: \`$OUTCOME\`). \`models-observed.json\` on \`main\` is unchanged."
+            elif [ "$OPENED" = "true" ]; then
+              echo "The rolling branch \`$BRANCH\` was updated and its pull request was left for a"
+              echo "person to merge, either because \`WALLS_AUTOMERGE\` is \`off\` or because the"
+              echo "run could not merge it."
+            else
+              echo "This repository does not let GitHub Actions open pull requests, so the"
+              echo "branch \`$BRANCH\` was pushed and the pull request is a click:"
+              echo
+              echo "$COMPARE"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

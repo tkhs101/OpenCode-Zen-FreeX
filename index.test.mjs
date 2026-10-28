@@ -34,6 +34,11 @@ process.env.OPENCODE_ZEN_FREE_DISCOVERY_CACHE = "";
 // it — nor ask for it. The cases about the snapshot pass an explicit local URL
 // or set the local pinned source themselves.
 process.env.OPENCODE_ZEN_FREE_LIMITS_SNAPSHOT_URL = "";
+// The protocol snapshot is the same kind of read to the same host: a cold
+// server starts it in the background, and a suite that did not pin it would
+// carry one extra fetch and one more floor through every assertion about a
+// discovery round. The cases about it pass an explicit URL of their own.
+process.env.OPENCODE_ZEN_FREE_MODELS_SNAPSHOT_URL = "";
 
 // The names the discovery reads are counted by. Zen's own list is also the
 // endpoint the fixture's `models` handler answers, so the three are named here
@@ -494,7 +499,7 @@ async function fixture(t, input = {}, serverOptions = {}) {
       } else {
         res.writeHead(next, {
           "content-type": "application/json",
-          "retry-after": "30",
+          "retry-after": state.retryAfter ?? "30",
           ...upstreamHeaders(),
         });
         res.end('{"error":{"message":"limited","type":"rate_limit_error"}}');
@@ -502,7 +507,7 @@ async function fixture(t, input = {}, serverOptions = {}) {
     } else if (state.status !== 200) {
       res.writeHead(state.status, {
         "content-type": "application/json",
-        "retry-after": "30",
+        "retry-after": state.retryAfter ?? "30",
         ...upstreamHeaders(),
       });
       res.end('{"error":{"message":"limited","type":"rate_limit_error"}}');
@@ -2153,6 +2158,126 @@ test("the retry wait and its ceiling are settable, and the defaults stay short",
   // Out-of-range values fall back rather than reaching the timer.
   assert.equal(retryWaitMs("999999999"), 1200);
   assert.equal(retryWaitCeilingMs("999999999"), 5000);
+});
+
+// A 429 may name its own window (`retry-after`), and the schedule above
+// deliberately ignores it by default. When it is honoured, the route's window
+// replaces one attempt's wait; everything else — the count, the ceiling on the
+// schedule, the loop's other rules — is where it was.
+test("a retry-after header is read in both spellings the tier uses", async () => {
+  const { retryAfterHeaderMs, retryAfterHonored } = await import("./provider.mjs");
+  const now = 1_700_000_000_000;
+  // Delta-seconds: the whole point of the header.
+  assert.equal(retryAfterHeaderMs("30", now), 30_000);
+  assert.equal(retryAfterHeaderMs("0", now), 0, "a window of zero is the route saying go");
+  // An HTTP date: in the future it is the distance to it; in the past it is a
+  // window already over, which is a zero and not a missing answer — the route
+  // said something, and what it said was go.
+  assert.equal(retryAfterHeaderMs(new Date(now + 5_000).toUTCString(), now), 5_000);
+  assert.equal(retryAfterHeaderMs(new Date(now - 5_000).toUTCString(), now), 0);
+  // Nothing the header could say that parses is a window this file honours.
+  assert.equal(retryAfterHeaderMs(undefined, now), undefined);
+  assert.equal(retryAfterHeaderMs("", now), undefined);
+  assert.equal(retryAfterHeaderMs(" soon", now), undefined);
+  assert.equal(retryAfterHeaderMs("1.5", now), undefined);
+  // Off by default, on for both spellings an operator could reach for.
+  assert.equal(retryAfterHonored(undefined), false);
+  assert.equal(retryAfterHonored("1"), true);
+  assert.equal(retryAfterHonored("true"), true);
+  assert.equal(retryAfterHonored("0"), false);
+});
+
+test("a honoured window replaces the wait it names, and the default ignores the header", async (t) => {
+  const { plugin, state, origin } = await fixture(t);
+  const held = {
+    after: process.env.OPENCODE_ZEN_FREE_RETRY_AFTER,
+    wait: process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS,
+  };
+  process.env.OPENCODE_ZEN_FREE_RETRY_AFTER = "1";
+  process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS = "100";
+  t.after(() => {
+    if (held.after === undefined) delete process.env.OPENCODE_ZEN_FREE_RETRY_AFTER;
+    else process.env.OPENCODE_ZEN_FREE_RETRY_AFTER = held.after;
+    if (held.wait === undefined) delete process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS;
+    else process.env.OPENCODE_ZEN_FREE_RETRY_WAIT_MS = held.wait;
+  });
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  const send = () =>
+    loader
+      .fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify({ model: "chat-free", messages: [{ role: "user", content: "hello" }] }),
+      })
+      .then((response) => response.status);
+  // The route names one second and the deployment's own schedule says 100ms:
+  // honoured, the wait is the route's. A 30-second header here would make this
+  // test a 30-second test, which is also the proof the wait followed the header
+  // and not the schedule.
+  state.statuses = [429, 200];
+  state.retryAfter = "1";
+  const started = Date.now();
+  assert.equal(await send(), 200);
+  const honoured = Date.now() - started;
+  assert.ok(
+    honoured >= 900,
+    `a honoured window was waited for (elapsed ${honoured}ms; the schedule's own wait is 100ms)`,
+  );
+  assert.ok(honoured < 10_000, "a honoured window is the route's one, not an unbounded one");
+  // Without the switch, the same header is the schedule's business: the wait
+  // stays the deployment's 100ms and the 30 seconds the route named are read
+  // by nobody.
+  process.env.OPENCODE_ZEN_FREE_RETRY_AFTER = "0";
+  state.statuses = [429, 200];
+  state.retryAfter = "30";
+  const ignored_start = Date.now();
+  assert.equal(await send(), 200);
+  const ignored = Date.now() - ignored_start;
+  assert.ok(
+    ignored < 5_000,
+    `the default ignores the header (elapsed ${ignored}ms; a honoured 30s would be far longer)`,
+  );
+});
+
+// The gap a deployment sets between its own consecutive requests. Off by
+// default — a delay on every request needs refusals as its evidence — and when
+// it is on, the second of two requests waits the gap before its first byte
+// leaves, which is where a burst begins.
+test("pacing spaces the requests a host makes, when it is switched on", async (t) => {
+  const { plugin, state, origin } = await fixture(t);
+  const held = process.env.OPENCODE_ZEN_FREE_PACING_MS;
+  process.env.OPENCODE_ZEN_FREE_PACING_MS = "300";
+  t.after(() => {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_PACING_MS;
+    else process.env.OPENCODE_ZEN_FREE_PACING_MS = held;
+  });
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  const send = () =>
+    loader
+      .fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify({ model: "chat-free", messages: [{ role: "user", content: "hello" }] }),
+      })
+      .then((response) => response.status);
+  assert.equal(await send(), 200, "the first request is not waited for by its own pace");
+  const second = Date.now();
+  assert.equal(await send(), 200, "the second answers as the first did");
+  const waited = Date.now() - second;
+  assert.ok(
+    waited >= 300,
+    `the second request waited the gap (elapsed ${waited}ms, pace 300ms)`,
+  );
+});
+
+test("the pacing gap is a setting with a floor, a ceiling and an off", async () => {
+  const { pacingMs } = await import("./provider.mjs");
+  assert.equal(pacingMs(undefined), 0, "off by default: a delay needs refusals as evidence");
+  assert.equal(pacingMs("0"), 0);
+  assert.equal(pacingMs("400"), 400);
+  assert.equal(pacingMs("30001"), 0, "above the ceiling is the default, not the value");
+  assert.equal(pacingMs("-1"), 0, "below the floor is the default");
+  assert.equal(pacingMs("soon"), 0);
 });
 
 // A request that never gets an answer is a different failure from a refusal, and

@@ -8,6 +8,8 @@
 
 **简体中文** · [English](https://github.com/tkhs101/OpenCode-Zen-FreeX/blob/main/README.en.md)
 
+机器可读文档：[llms.txt](https://raw.githubusercontent.com/tkhs101/OpenCode-Zen-FreeX/main/llms.txt) · [llms-full.txt](https://raw.githubusercontent.com/tkhs101/OpenCode-Zen-FreeX/main/llms-full.txt)（由 `bun run docs:llms` 从英文 README 与 MAINTAINING 生成）
+
 [![CI](https://img.shields.io/github/actions/workflow/status/tkhs101/OpenCode-Zen-FreeX/ci.yml?branch=main&style=flat-square&label=CI)](https://github.com/tkhs101/OpenCode-Zen-FreeX/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/opencode-zen-freex?style=flat-square&logo=npm&logoColor=white)](https://www.npmjs.com/package/opencode-zen-freex) [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg?style=flat-square)](LICENSE) [![Runtime: bun](https://img.shields.io/badge/runtime-bun-f472b6?style=flat-square&logo=bun&logoColor=white)](https://bun.sh)
 
 </div>
@@ -42,7 +44,7 @@ magpie plugin login opencode-zen-free
 
 模型名写作 `opencode-zen-free/<id>`，例如 `opencode-zen-free/big-pickle`。
 
-- **自动发现**：宿主列举模型时读取 Zen 的列表，60 秒内的重复列举复用上一次结果。读到的列表会写进缓存（`~/.cache/opencode-zen-freex/discovery.json`，Windows 在 `%LOCALAPPDATA%` 下）；列表读不到时由缓存或包内旧表顶替，有缓存时把数据的年龄一并告知宿主。
+- **自动发现**：宿主列举模型时读取 Zen 的列表，60 秒内的重复列举复用上一次结果。读到的列表会写进缓存（`~/.cache/opencode-zen-freex/discovery.json`，Windows 在 `%LOCALAPPDATA%` 下）；列表读不到时由缓存或包内旧表顶替，有缓存时把数据的年龄一并告知宿主。协议端点表另有自己的快照（`models-observed.json`，仓库工作流每小时对照文档页增量发布，插件后台拉取）：文档页读不到或某模型的端点行被撤下时，由快照或包内副本顶替，模型不会被问到错误的端点上。
 - **上限按实测**：目录、厂商自述与路由实际执行的墙常有出入。上下文按实测能过的最大值对齐，输出优先取同一网关付费孪生的声明。例如 `mimo-v2.6-flash-free` 目录写 20 万，实测 37.5 万；`glm-5.3-flash-free` 的付费孪生声明 100 万，实测 32.3 万；路由自己否掉的上限也照认，`deepseek-v4.1-flash-free` 的 100 万因此收紧到 32.6 万。依据与复测方法见 [`MAINTAINING.md` 的 “Limits Zen under-reports”](MAINTAINING.md#limits-zen-under-reports)。
 - **上限还会从流量里学**：插件不额外发请求，只用自己转发的请求向上试探、向下收敛；学到的值重启后仍在，被拒的模型会自动收回到已经证明能过的尺寸。
 - **实测快照不用等发版**：仓库每小时做一次增量实测，写入 `limits-observed.json` 并发布到 `main`；插件启动后每小时最多后台拉取一次，读不到就用缓存或包内副本。
@@ -111,6 +113,13 @@ bun run capture             # 确认差异后才写入
 | `OPENCODE_ZEN_FREE_RETRY_429` | 429 的重试次数，默认 `2`；`0` 关闭 |
 | `OPENCODE_ZEN_FREE_RETRY_WAIT_MS` | 首次重试前等待的毫秒数，默认 `1200`，逐次翻倍 |
 | `OPENCODE_ZEN_FREE_RETRY_WAIT_MAX_MS` | 等待封顶，默认 `5000`；默认偏短是刻意的，确有需要的部署自行调高 |
+| `OPENCODE_ZEN_FREE_RETRY_AFTER` | `1` 时尊重 429 自带的 `retry-after` 窗口（单次等待改用它，封顶仍为 120 秒）；默认忽略 |
+| `OPENCODE_ZEN_FREE_PACING_MS` | 本 loader 相邻两次请求的最小间隔毫秒；默认 `0`（关闭），上限 `30000` |
+| `OPENCODE_ZEN_FREE_MODELS_SNAPSHOT` | 协议快照的包内路径；空字符串表示不用包内副本 |
+| `OPENCODE_ZEN_FREE_MODELS_SNAPSHOT_URL` | 远程协议快照地址；空字符串关闭远程 |
+| `OPENCODE_ZEN_FREE_MODELS_SNAPSHOT_CACHE` | 远程协议快照缓存路径；空字符串只留在内存 |
+| `OPENCODE_ZEN_FREE_MODELS_SNAPSHOT_REFRESH_MS` | 远程协议快照的刷新间隔，默认 `3600000` |
+| `OPENCODE_ZEN_FREE_MODELS_SNAPSHOT_TIMEOUT_MS` | 远程协议快照单次取回的超时，默认 `5000` |
 | `OPENCODE_ZEN_FREE_LIMITS_SNAPSHOT` | 实测快照路径；空字符串表示不读快照 |
 | `OPENCODE_ZEN_FREE_LIMITS_SNAPSHOT_URL` | 远程快照地址；空字符串关闭远程 |
 | `OPENCODE_ZEN_FREE_LIMITS_STATE` | 学习到的上限状态路径；空字符串表示只在内存中 |
@@ -126,7 +135,7 @@ bun run capture             # 确认差异后才写入
 | 插件载体 | [magpie](https://github.com/yetone/magpie) |
 | 模型提供者 | [anomalyco/opencode](https://github.com/anomalyco/opencode) |
 | 本仓库常用 Agent | [deepseek-harness](https://github.com/deepseek-ai/deepseek-harness) · [hermes-agent](https://github.com/NousResearch/hermes-agent) |
-| 灵感来源 | [9router](https://github.com/decolua/9router) · [opencode2api](https://github.com/jasonxu114514/opencode2api) · [zen-gate](https://github.com/LAGcomcom/zen-gate) |
+| 灵感来源 | [9router](https://github.com/decolua/9router) · [opencode2api](https://github.com/jasonxu114514/opencode2api) · [zen-proxy](https://github.com/12errh/zen-proxy) |
 
 ## 许可
 

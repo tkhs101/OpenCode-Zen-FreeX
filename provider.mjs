@@ -34,6 +34,17 @@ import { collapseResponse, dropStaleHeaders } from "./stream.mjs";
 import { guardToolResponse } from "./tool-response.mjs";
 import { injectOfficialPrompt } from "./official-prompt.mjs";
 import { officialToolNames, renameAndCompleteTools } from "./official-tools.mjs";
+import {
+  bundledModelsSnapshot,
+  installModelsSnapshot,
+  installedProtocols,
+  modelsSnapshotCachePath,
+  modelsSnapshotRefreshMs,
+  modelsSnapshotTimeoutMs,
+  modelsSnapshotURL,
+  readModelsSnapshotCache,
+  refreshModelsSnapshot,
+} from "./catalog.mjs";
 
 // Zen moved behind opencode.ai/inference; everything under /zen/ answers 403
 // FreeTierError now, however the request is made.
@@ -42,9 +53,12 @@ export const CATALOG = "https://models.opencode.ai/api.json";
 // The cross-provider view of the same models, matched by `canonical_model_id`.
 // See MODELS_DEV_MIN in limits.mjs for the one rule its numbers are used for.
 export const MODELS_DEV_URL = "https://models.dev/api.json";
-const DOCS =
-  "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/models.mdx";
 const PATHS = { chat: "/chat/completions", responses: "/responses", anthropic: "/messages" };
+// Exported for the survey that snapshots the docs table (models-watch.mjs), so
+// the writer and the runtime read the same page rather than two copies of one
+// URL that can drift.
+export const DOCS =
+  "https://raw.githubusercontent.com/anomalyco/opencode/dev/services/www/src/docs/content/console/models.mdx";
 // The age of the maps a listing-failure fallback hands back, read by a host with
 // `Symbol.for` so the two processes need no shared module. It describes the map
 // and not any one model — a note on a model record would make the cache a second
@@ -649,6 +663,67 @@ export function retryWaitCeilingMs(raw = globalThis.process?.env?.[RETRY_WAIT_MA
   return Math.max(ceiling, floor);
 }
 
+// Whether a 429's own window may set the wait. The doubling schedule above is
+// this package's opinion of how long to hold a turn, and its defaults are
+// deliberately short; `OPENCODE_ZEN_FREE_RETRY_AFTER=1` hands that decision to
+// the route whenever it makes one: a refusal carrying `retry-after` is waited
+// for the window it names, bounded by RETRY_WAIT_MAX_LIMIT_MS, and a refusal
+// without one keeps the schedule. Read per call, like every setting on this
+// path, so switching it on does not need a restart.
+const RETRY_AFTER_ENV = "OPENCODE_ZEN_FREE_RETRY_AFTER";
+
+export function retryAfterHonored(raw = globalThis.process?.env?.[RETRY_AFTER_ENV]) {
+  return raw === "1" || raw === "true";
+}
+
+// A route's window, as a number of milliseconds. Two spellings are the ones
+// HTTP names: delta-seconds (an integer; `retry-after: 30`) and an HTTP date.
+// Anything else — a float, a word, an empty header — is no window at all and
+// answers undefined, which the caller reads as "no route opinion; the schedule
+// stands". The date spelling is recognised by the day name that starts every
+// RFC 1123 date, because a parser this lenient would otherwise read "1.5" as
+// January 5th and answer a window for it. A date in the past is a window
+// already over: the answer is zero, not undefined, because the route has said
+// something — it said "go" — and one answer undefined would start the schedule
+// instead.
+//
+// The number is returned uncapped: the cap is the caller's, and the caller's
+// bound (RETRY_WAIT_MAX_LIMIT_MS) is shared with the deployment ceilings above,
+// so no spelling of a window can park a caller longer than any wait this file
+// otherwise allows.
+export function retryAfterHeaderMs(value, now = Date.now()) {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (trimmed === "") return undefined;
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
+  if (!/^[A-Za-z]{3},/.test(trimmed)) return undefined;
+  const at = Date.parse(trimmed);
+  if (!Number.isFinite(at)) return undefined;
+  return Math.max(0, at - now);
+}
+
+// The smallest gap between two requests this path sends, when one is wanted.
+// Zen-proxy's byte-for-byte work against this same tier measured that identity
+// hops in rapid bursts are blanket-refused where the same requests spaced about
+// half a second apart pass, which makes the hop this package's retry does (a
+// fresh session and a fresh project id, asked again at once) a pattern the gate
+// already has an opinion about. The wait between retries is already that spacer
+// and need not be touched; the gap this setting owns is between a host's own
+// consecutive requests, whose bursts are the host's shape and not this file's.
+//
+// `OPENCODE_ZEN_FREE_PACING_MS` sets it, bounded to one request every thing
+// between 0 and 30 seconds; the default is 0 — off — because a delay imposed on
+// every request needs a reason measured in refusals, not in plausibility, and a
+// deployment that has seen burst refusals is the one that has it. The gap is
+// read per request, so a change takes effect on the next one.
+const PACING_ENV = "OPENCODE_ZEN_FREE_PACING_MS";
+const PACING_DEFAULT_MS = 0;
+const PACING_MAX_MS = 30_000;
+
+export function pacingMs(raw = globalThis.process?.env?.[PACING_ENV]) {
+  return retrySetting(raw, { min: 0, max: PACING_MAX_MS, fallback: PACING_DEFAULT_MS });
+}
+
 // Wait, and stop waiting the moment the caller gives up. A retry is a delay the
 // caller never asked for, so it must not outlive the request: a host that
 // aborted gets its abort back rather than a wait it can no longer use. The timer
@@ -797,6 +872,18 @@ export function opencodeID(prefix, descending, now = Date.now()) {
 // lands.
 export function randomProjectID() {
   return [...randomBytes(20)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+// Both halves of a replacement ledger, minted in one instant. A retry is one
+// request's worth of quota replaced wholesale — the session and the project id
+// are what the tier ledgers against, retired together and re-made together —
+// and a pair minted from two separate reads of the clock is not one action:
+// two ids that disagree about when their request happened are exactly the
+// shape a gate that reads a session and a project as "one conversation, made
+// now" would look at twice. The first attempt keeps `sessionID`'s answer and
+// this function is for what replaces it.
+export function mintIdentity(now = Date.now()) {
+  return { session: opencodeID("ses", true, now), project: randomProjectID() };
 }
 
 // A session id OpenCode itself could have made: its counter (the low 12 bits,
@@ -1130,6 +1217,71 @@ async function server(_input, options = {}) {
   if (snapshotURL !== undefined && Date.now() - snapshotAttemptAt >= snapshotRefreshMs)
     refreshSnapshotSoon();
 
+  // ---- the remote models snapshot (catalog.mjs) ------------------------------
+  //
+  // The same when-owning block as the walls snapshot above, for the protocol
+  // table: the snapshot the repository's survey publishes, read in the
+  // background without a model list ever waiting on it. catalog.mjs owns the
+  // URL, the cache, the parser, the installer and the fetch itself, through the
+  // one refresh pipeline refreshSnapshot parameterises; this block owns only
+  // when, and nothing here may fail or wait on a start.
+  const modelsSnapshotUrl = modelsSnapshotURL(options.modelsSnapshotURL);
+  const modelsSnapshotCache = modelsSnapshotCachePath(options.modelsSnapshotCachePath);
+  const modelsSnapshotRefresh = modelsSnapshotRefreshMs(options.modelsSnapshotRefreshMs);
+  const modelsSnapshotTimeout = modelsSnapshotTimeoutMs(options.modelsSnapshotTimeoutMs);
+  let modelsSnapshotAttemptAt = 0;
+  let modelsSnapshotFlight = null;
+  function refreshModelsSnapshotSoon() {
+    if (modelsSnapshotUrl === undefined) return false;
+    const now = Date.now();
+    if (now - modelsSnapshotAttemptAt < modelsSnapshotRefresh) return false;
+    if (modelsSnapshotFlight !== null) return false;
+    modelsSnapshotAttemptAt = now;
+    // Not awaited, for the same reason the walls refresh is not: the answer
+    // improves the protocols floor, and a host waiting for its model list must
+    // not wait for GitHub. The refresh installs only a whole valid document and
+    // answers a failure instead of throwing.
+    modelsSnapshotFlight = refreshModelsSnapshot({
+      url: modelsSnapshotUrl,
+      cachePath: modelsSnapshotCache,
+      timeoutMs: modelsSnapshotTimeout,
+    })
+      .catch(() => ({ ok: false, reason: "fetch" }))
+      .finally(() => {
+        modelsSnapshotFlight = null;
+      });
+    return true;
+  }
+  // The cache is read synchronously, before the bootstrap table is widened, for
+  // the same reason the walls cache is: an installed answer is the newest floor
+  // this process has. Its age is the cache's, not this process's, so a restart
+  // with a fresh cache does not spend a fetch.
+  const cachedModelsSnapshot =
+    modelsSnapshotUrl === undefined ? undefined : readModelsSnapshotCache(modelsSnapshotCache);
+  if (cachedModelsSnapshot) {
+    installModelsSnapshot(cachedModelsSnapshot.protocols, {
+      source: "cache",
+      fetchedAt: cachedModelsSnapshot.fetchedAt,
+      // The cache file does not carry the URL it was fetched from, so claiming
+      // the currently configured URL would misreport the source after a mirror
+      // change. The source and date are what the file can prove.
+      url: undefined,
+    });
+    modelsSnapshotAttemptAt = cachedModelsSnapshot.fetchedAt;
+  }
+  if (modelsSnapshotUrl !== undefined && Date.now() - modelsSnapshotAttemptAt >= modelsSnapshotRefresh)
+    refreshModelsSnapshotSoon();
+
+  // The bundled copy is read once here rather than per discovery: it is the
+  // floor under everything this process builds, and a file read per listing
+  // would be a syscall per answer. An explicit "" is the caller saying "no
+  // bundled copy at all", which is a supported deployment the same way an
+  // unset snapshot is — and the floor below is what honours it, because the
+  // fallback it passes the installer is this empty object and not a second
+  // read of the file it named.
+  const bundledProtocols = bundledModelsSnapshot(options.modelsSnapshotPath);
+  const floorProtocols = () => installedProtocols(bundledProtocols);
+
   // What the last process learned, read once at startup and before the first
   // answer. A restart otherwise begins with the bootstrap table, and the first
   // request after it pays for a listing a previous process already read. The
@@ -1150,7 +1302,11 @@ async function server(_input, options = {}) {
     baseURL,
   );
   let metadata = bootstrapProvider;
-  let protocols = { ...bootstrapProtocols };
+  // The protocols floor come from two snapshots — the bundled copy and whatever
+  // a remote answer installed above — and sits between bootstrap and live: the
+  // bootstrap table is hand-written and the snapshot is read from the live docs,
+  // so where both name one id the snapshot is the newer statement.
+  let protocols = { ...bootstrapProtocols, ...floorProtocols() };
   // How old the data in `known` is: 0 while it is the bootstrap table, the
   // cache's own date once it was read, and the live read's time after a
   // discovery. It is what a listing-failure fallback reports, so a host can
@@ -1166,7 +1322,10 @@ async function server(_input, options = {}) {
     // is a floor for a listing failure, not a union with the shipped table; the
     // live listing still overwrites both.
     known = { ...cachedDiscovery.models };
-    protocols = { ...cachedDiscovery.protocols };
+    // The cache is newer than the bundled copy for any id it names, so the
+    // snapshot floor goes under it: an id the cache names is answered by the
+    // cache, and one it does not is answered by the floor.
+    protocols = { ...floorProtocols(), ...cachedDiscovery.protocols };
     knownAt = Date.parse(cachedDiscovery.listedAt) || 0;
   }
   // When the list was last read, or last asked for: the cache's date when one
@@ -1361,8 +1520,14 @@ async function server(_input, options = {}) {
     }
     if (docs.status === "fulfilled" && Object.keys(parseProtocolDocs(docs.value)).length) {
       // The snapshot is the floor, not a rival: the docs say what they say and
-      // the snapshot only fills what they no longer name.
-      protocols = { ...bootstrapProtocols, ...parseProtocolDocs(docs.value) };
+      // the snapshot only fills what they no longer name. The same precedence
+      // keeps the bundled copy under the remote answer, because the remote
+      // answer was read more recently than this build was cut.
+      protocols = {
+        ...bootstrapProtocols,
+        ...floorProtocols(),
+        ...parseProtocolDocs(docs.value),
+      };
     } else {
       partial = true;
     }
@@ -1506,9 +1671,19 @@ async function server(_input, options = {}) {
         const auth = await getAuth();
         if (!auth) return {};
         requirePublic(auth);
+        // When this loader last put a request on the wire: the pacing gap's
+        // other end. It lives here rather than inside the fetch below because
+        // the burst it spaces is this host's consecutive requests, not one
+        // request's retries — those already carry waits of their own.
+        let lastOutboundAt = 0;
         return {
           baseURL,
           apiKey: "public",
+          // The pace a deployment has set is state across this loader's
+          // requests, not across one request's attempts: the burst it spaces
+          // is the host's own consecutive requests, and the retries already
+          // carry their own waits. One reading of the clock per request is
+          // what the gap is measured from.
           async fetch(input, init) {
             requirePublic(await getAuth());
             const request = new Request(input, init);
@@ -1590,14 +1765,19 @@ async function server(_input, options = {}) {
             // and every retry takes a fresh one. Outside affinity (`sessionID`
             // already minted per request) a fresh id is what `opencodeID` gives,
             // so the two branches agree and the first attempt is unchanged.
+            //
+            // A retry's fresh ids are minted as one pair (`mintIdentity`), not
+            // as two calls of two clocks: the pair is handed the tier together
+            // and therefore says one thing about when its request happened.
             let attempts = 0;
-            const attemptHeaders = () =>
-              outboundHeaders({
+            const attemptHeaders = () => {
+              const fresh = attempts === 0 ? undefined : mintIdentity();
+              return outboundHeaders({
                 // The tier files what it thinks of this traffic against the
                 // session, and a session that was refused once is a session the
                 // next request answers for. So a retry mints a new one; the
                 // first attempt keeps whatever `sessionID` decided.
-                session: attempts === 0 ? session : opencodeID("ses", true),
+                session: attempts === 0 ? session : fresh.session,
                 // The generation the tools in this request say, which is the one
                 // normalizeTools has already decided: deciding it twice is how a
                 // User-Agent and a body come to describe different generations.
@@ -1617,8 +1797,9 @@ async function server(_input, options = {}) {
                   // keeps its own name; one that does not gets an id of its
                   // own for the request, in the git-hash shape the CLI sends.
                   hostProject ||
-                  randomProjectID(),
+                  (attempts === 0 ? randomProjectID() : fresh.project),
               });
+            };
             // The bytes are the same on every attempt — the body was shaped once
             // above — so they are encoded once here rather than per attempt.
             const encoded = encodeBody(body, protocol, toolPolicy.generation);
@@ -1633,6 +1814,13 @@ async function server(_input, options = {}) {
               // attempt a retry.
               const headers = attemptHeaders();
               attempts += 1;
+              const gap = pacingMs();
+              if (gap > 0) {
+                const now = Date.now();
+                const earliest = lastOutboundAt + gap;
+                if (now < earliest) await pause(earliest - now, request.signal);
+                lastOutboundAt = Date.now();
+              }
               let response;
               try {
                 response = await fetch(upstreamEndpoint(baseURL, protocol), {
@@ -1684,6 +1872,7 @@ async function server(_input, options = {}) {
             let result = await attempt();
             const retries = retry429Count();
             const waitCeiling = retryWaitCeilingMs();
+            const honors = retryAfterHonored();
             let wait = retryWaitMs();
             for (let tried = 0; tried < retries; tried += 1) {
               const quota =
@@ -1696,7 +1885,19 @@ async function server(_input, options = {}) {
               if (!quota && !(transport && looksLikeTransportFailure(result.failed, request.signal)))
                 break;
               request.signal.throwIfAborted();
-              await pause(wait, request.signal);
+              // A 429 that names its own window is waited for that window before
+              // the schedule, when the deployment has asked for it (`retryAfterHonored`):
+              // one wait replaced, the schedule itself left alone, so a next
+              // refusal without a window falls back to where the doubling is.
+              let hold = wait;
+              if (quota && honors) {
+                const named = retryAfterHeaderMs(
+                  result.response?.headers?.get?.("retry-after"),
+                  Date.now(),
+                );
+                if (named !== undefined) hold = Math.min(named, RETRY_WAIT_MAX_LIMIT_MS);
+              }
+              await pause(hold, request.signal);
               wait = Math.min(wait * 2, waitCeiling);
               result = await attempt();
             }
@@ -1753,6 +1954,10 @@ async function server(_input, options = {}) {
         // a bundled answer for. A failure leaves the cache or the bundled table
         // installed and is not retried until the TTL says so.
         refreshSnapshotSoon();
+        // The protocol snapshot gets the same hour-by-hour treatment beside it:
+        // both are optimisations over bundled answers, and neither is worth a
+        // model list that waits on GitHub.
+        refreshModelsSnapshotSoon();
         // Asked without a signal, and deliberately: the hook has none to give,
         // and passing `undefined` on as one would read as a caller that cancels
         // nothing — `leased` takes it as "no way out", which is what this call

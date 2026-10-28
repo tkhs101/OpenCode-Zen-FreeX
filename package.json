@@ -10,6 +10,7 @@
     "./provider.mjs": "./provider.mjs",
     "./core-tools.mjs": "./core-tools.mjs",
     "./models.mjs": "./models.mjs",
+    "./catalog.mjs": "./catalog.mjs",
     "./limits.mjs": "./limits.mjs",
     "./stream.mjs": "./stream.mjs",
     "./tool-response.mjs": "./tool-response.mjs",
@@ -25,6 +26,8 @@
     "limits.mjs",
     "limits-observed.json",
     "models.mjs",
+    "models-observed.json",
+    "catalog.mjs",
     "stream.mjs",
     "tool-response.mjs",
     "official-tools.mjs",
@@ -67,7 +70,10 @@
     "limits:audit": "test -f limits-audit.mjs || { echo \"limits:audit runs from a repository checkout; the published package does not ship limits-audit.mjs.\" >&2; exit 1; }; bun limits-audit.mjs",
     "capture": "test -f capture.mjs || { echo \"capture runs from a repository checkout; the published package does not ship capture.mjs.\" >&2; exit 1; }; bun capture.mjs",
     "limits:sweep": "test -f limits-sweep.mjs || { echo \"limits:sweep runs from a repository checkout; the published package does not ship limits-sweep.mjs.\" >&2; exit 1; }; bun limits-sweep.mjs",
-    "limits:watch": "test -f limits-watch.mjs || { echo \"limits:watch runs from a repository checkout; the published package does not ship limits-watch.mjs.\" >&2; exit 1; }; bun limits-watch.mjs"
+    "limits:watch": "test -f limits-watch.mjs || { echo \"limits:watch runs from a repository checkout; the published package does not ship limits-watch.mjs.\" >&2; exit 1; }; bun limits-watch.mjs",
+    "models:watch": "test -f models-watch.mjs || { echo \"models:watch runs from a repository checkout; the published package does not ship models-watch.mjs.\" >&2; exit 1; }; bun models-watch.mjs",
+    "releases:watch": "test -f releases-watch.mjs || { echo \"releases:watch runs from a repository checkout; the published package does not ship releases-watch.mjs.\" >&2; exit 1; }; bun releases-watch.mjs",
+    "docs:llms": "test -f make-llms.mjs || { echo \"docs:llms runs from a repository checkout; the published package does not ship make-llms.mjs.\" >&2; exit 1; }; bun make-llms.mjs"
   },
   "packageManager": "bun@1.4.3",
   "magpie": {
