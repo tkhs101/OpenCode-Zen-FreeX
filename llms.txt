@@ -1,0 +1,13 @@
+# OpenCode Zen FreeX
+
+> OpenCode Zen's free models, for hosts that are not OpenCode: a magpie/OpenCode provider plugin that uses the free tier's public credential, discovers new free models automatically, and shapes every request to the OpenCode generation the free tier currently admits (captured headers, system prompt, and the complete tool set, per generation).
+
+## From the repository
+
+- [README (English)](https://raw.githubusercontent.com/tkhs101/OpenCode-Zen-FreeX/main/README.en.md): installation, the free-credential login, what each request does, and the full troubleshooting table. The project's own words.
+- [MAINTAINING](https://raw.githubusercontent.com/tkhs101/OpenCode-Zen-FreeX/main/MAINTAINING.md): why free-tier support is fragile, the capture loop that refreshes the fingerprint ("The loop"), the measured limits Zen under-reports, and every easy way to break the plugin.
+- [Machine-readable docs, full](https://raw.githubusercontent.com/tkhs101/OpenCode-Zen-FreeX/main/llms-full.txt): the two documents above concatenated, for a context that wants one fetch.
+- [The walls snapshot](https://raw.githubusercontent.com/tkhs101/OpenCode-Zen-FreeX/main/limits-observed.json): the measured context windows, committed hourly by a workflow and read at run time.
+- [The protocol snapshot](https://raw.githubusercontent.com/tkhs101/OpenCode-Zen-FreeX/main/models-observed.json): which free model is asked at which endpoint, read from OpenCode's docs table by the same survey.
+- [Upstream provider](https://github.com/tkhs101/OpenCode-Zen-FreeX): tkhs101/OpenCode-Zen-FreeX; the plugin this document describes.
+- [Predecessor](https://github.com/tkhs101/OpenCode-Zen-FreeX): magpie-community/plugins/packages/zen-free, the plugin this one forked from.

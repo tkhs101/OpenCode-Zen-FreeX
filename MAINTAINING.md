@@ -807,6 +807,19 @@ at, the same trick as `capture.mjs` but driving the desktop binary), and the
 raw request it read is kept beside them as
 `genuine-2.1.4-request.json`.
 
+The next move of that loop, on 2026-10-28, is the worked example the watchers
+promise: `releases-watch` named 2.2.0, and `capture` — pointed at the installed
+2.2.0 desktop CLI, which a desktop build only runs when given `--standalone`
+(said in `capture.mjs` where the flag is passed) — moved the fingerprint. Two
+shapes changed and were recorded as they arrived: the agent string's client
+segment, `cli` on 2.1.4, reads `desktop` on the 2.2.0 build, and the `read` and
+`shell` definitions grew the `additionalProperties: false` this capture shows.
+The prompts and the other ten tools came through byte for byte unchanged —
+checked against the raw request, kept beside its predecessor as
+`genuine-2.2.0-request.json` — so nothing was rewritten by hand this time; the
+one new block in the 2.2.0 prompt, the skill listing, is the one `official-
+prompt.mjs` strips, for the measured reason recorded there.
+
 The `anthropic` provider-utils in `fingerprint.json` is the one entry a capture
 cannot take: no free model speaks that protocol, so the anthropic request shape
 is refused and the value in the file is one a human has to keep. It is
@@ -869,7 +882,87 @@ or to `capture`.
 request was not authorized. Not a fingerprint problem either, and the gate says
 so rather than naming the wording. A 429 is the one to read twice: repeated
 refusals from this address can put it in a cooldown, and a cooldown answers
-quickly and often.
+quickly and often — and since 2026-10-28 the same `FreeUsageLimitError` body
+("free usage limit reached") is also what a *promptless* request earns, on any
+egress, under any session id old or new: the tier stopped serving requests
+without the generation's system prompt and answers them from the quota page of
+its error catalogue. The gate's probes now carry the prompt (the gate's
+`chatRequest`, where the measurement is dated), so a `failed 429` here means
+what it says again.
+
+## What the request path already carries
+
+The observations below were taken from a byte-capture of a real OpenCode request
+the same way the fingerprint itself was never guessed, and the plugin read
+them and answered by building the response into what it already does rather
+than by leaving a plan in a comment. Three of them read like features of
+this proxy — they are, and each is a sentence or two about a lane the gate
+already reads.
+
+**The gate reads the stream flag.** The route's own spec, measured from
+a capture replay, names three things a request must carry and names the stream
+flag among them — a request with `stream: false` is refused on the shape it
+presents. What this plugin does about it is older than the observation: every
+request leaves with `stream: true` set, and a host that asked for a plain JSON
+answer gets one anyway, because `stream.mjs`'s `collapseResponse` is what the
+request path returns through when the host did not ask to stream. The
+contingency is not a plan; it is the default path. What could still break it is
+an upstream that starts distinguishing *how* it streams (chunking, ordering,
+envelope), and the answer for that would be a capture of a streaming request
+rather than new code.
+
+**Identity hops in bursts are blanket-refused.** The same replay measured that
+a burst of requests that each hop to a fresh identity (a new session id, a new
+project id) from one egress gets refused as a batch, while the same requests
+spaced roughly half a second apart pass. The retry loop's own wait is a spacer
+already and need not be touched — what was missing was the spacer between a
+host's own consecutive requests, whose burst shape is the host's and not this
+file's. `OPENCODE_ZEN_FREE_PACING_MS` waits a gap before each outbound request,
+default off, because a delay on every request needs evidence in refusals and a
+deployment that has them is the one that turns it on. The retry keeps its own
+schedule: a retry is one replacement ledger, awaited, and not a burst.
+
+**The window a 429 names can be honoured.** A route's 429 may carry a
+`retry-after` header that says when the same bucket answers again. The retry
+schedule above deliberately ignores it by default — its defaults are short and
+its opinion is already documented — but `OPENCODE_ZEN_FREE_RETRY_AFTER=1` hands
+the wait to the route whenever it makes one: one attempt's wait replaced by the
+route's window (bounded by `RETRY_WAIT_MAX_LIMIT_MS`, so no spelling of a header
+can park a host), the schedule untouched for the next refusal without a window.
+`retryAfterHeaderMs` in `provider.mjs` reads both HTTP spellings because both
+are ones the tier has used.
+
+**A retry's ledger is minted as one pair.** The tier reads a session id and a
+project id as one conversation in one project, so a retry replaces both halves
+together (`mintIdentity` in `provider.mjs`), from one reading of the clock, and
+the pair's ids that replace each other are a pair that says one thing. The
+first attempt keeps `sessionID`'s answer: under affinity that id IS the
+conversation, and outside it the id minted per request is already the pair's
+own half.
+
+## The watchers
+
+Two scheduled watchers ask questions elsewhere, so a move is noticed rather
+than reported; both are checkout tools, and both follow the walls workflow's
+conventions (an interval guard, a report in the run summary, a pull request for
+a file whose values a host reads).
+
+- `models-watch.mjs` (`catalog.yml`, hourly) reads OpenCode's docs table — the
+  page `models.mjs` parses on every discovery — and commits what the same parser
+  made of it as `models-observed.json`. It is derived data, not a measurement:
+  it costs one page's read and no Zen credential at all. The runtime layer is
+  `catalog.mjs`, which installs the answer under everything newer (the cache,
+  then the bundled floor, then the bootstrap table) and over nothing that the
+  live docs name. The shape rules both ends obey are the parser's, and the
+  file a workflow publishes is preflighted by `--check` before the network is
+  asked and re-checked before it is published.
+- `releases-watch.mjs` (`releases.yml`, daily) reads OpenCode's releases feed and
+  compares it with the version `fingerprint.json` says it was captured from. It
+  answers with a fact, never with a change: a newer release means the floor may
+  have moved, and what acts on that is the capture loop. A new release opens the
+  one open issue that asks for it, and the watcher itself rewrites nothing — a
+  version that moved without its prompt and its tools is the one shape the gate
+  reads as incoherent.
 
 ## Things that are easy to break
 
@@ -1194,37 +1287,45 @@ that passes under the stricter of them, since the looser one will not last.
 | `opencode-prompt-v2.txt` | the 2.1.4 CLI's own system prompt, placeholders for model, date and env |
 | `official-tools.json` | the CLI's complete tool sets, one per generation |
 | `genuine-2.1.4-request.json` | the raw request the 2026-10-25 2.1.4 assets were read from |
+| `genuine-2.2.0-request.json` | the raw request behind the 2026-10-28 fingerprint, same shape of proof |
 | `core-tools.mjs` | reads the capture; says which generation a request is |
 | `official-prompt.mjs` | injects the official prompt in front of the host's instructions |
 | `official-tools.mjs` | renames the host's tools `clint_` and appends the official set |
 | `provider.mjs` | the plugin: discovery, headers, tools, the diagnostic |
 | `models.mjs` | which models are free, and what protocol each speaks |
+| `catalog.mjs` | the protocol snapshot's runtime layer: the bundled copy, the remote answer, and the floor they give discovery |
+| `models-observed.json` | what the docs table last said, read at run time as the endpoint floor |
 | `limits.mjs` | what a model's limits are, where the catalogue under-reports them |
 | `stream.mjs`, `tool-response.mjs` | replies Zen cuts short, and tool calls |
 | `limits-audit.mjs` | asks the route which ids it still offers and which look under-declared (`limits:audit`) |
 | `limits-sweep.mjs` | brackets one id's prompt wall on the live route (`limits:sweep`) |
 | `limits-watch.mjs` | the scheduled diff and sweep: what is offered, what was measured, what to measure, and the snapshot's freshness report (`limits:watch`) |
 | `limits-observed.json` | what the last scheduled run measured: read at run time as the `route-sweep` tier |
+| `models-watch.mjs` | the docs table's own survey: what is offered, what moved, and the snapshot's check (`models:watch`) |
+| `releases-watch.mjs` | the release watcher: what OpenCode shipped, against what was captured (`releases:watch`) |
+| `make-llms.mjs` | rewrites `llms.txt` and `llms-full.txt` from the English README and this document (`docs:llms`) |
 | `capture.mjs` | takes a new capture |
 | `mini-capture.mjs` | the same trick driving the desktop CLI binary, for captures of an installed OpenCode |
 | `tools-smoke.mjs` | asks Zen what it accepts (`check:gate`) |
 | `assert-bun-version.mjs` | checks that the Bun on PATH is the one `package.json` declares (CI only) |
 
 `capture.mjs`, `mini-capture.mjs`, `limits-audit.mjs`, `limits-sweep.mjs`,
-`limits-watch.mjs`,
-`tools-smoke.mjs` and `assert-bun-version.mjs` are maintenance tools for this
-repository, not part of what a host loads: they are not in `package.json`'s
-`files`, so a published tarball
+`limits-watch.mjs`, `models-watch.mjs`, `releases-watch.mjs`,
+`make-llms.mjs`, `tools-smoke.mjs` and `assert-bun-version.mjs` are maintenance
+tools for this repository, not part of what a host loads: they are not in
+`package.json`'s `files`, so a published tarball
 carries the modules a host imports, `fingerprint.json`, `limits-observed.json`
-(which `limits.mjs` does read at run time), the prompt and tool-set captures
+(which `limits.mjs` does read at run time), `models-observed.json` (which
+`catalog.mjs` reads the same way), the prompt and tool-set captures
 (`opencode-prompt-v1.txt`, `opencode-prompt-v2.txt` and `official-tools.json`,
 which `official-prompt.mjs` and `official-tools.mjs` read at run time) and the
 four documents beside them
-(`README.md`, `MAINTAINING.md`, `LICENSE`, `NOTICE`) - eighteen named in `files`,
+(`README.md`, `MAINTAINING.md`, `LICENSE`, `NOTICE`) — twenty named in `files`,
 which with `package.json` and the English `README.en.md` (a README under any
-name is packed whatever `files` says) makes twenty in the tarball. The same list
+name is packed whatever `files` says) makes twenty-two in the tarball. The same list
 is why `npm run` has nothing to run in an installed package: `check:gate`,
-`limits:audit`, `capture`, `limits:sweep` and `limits:watch` are entry points for
+`limits:audit`, `capture`, `limits:sweep`, `limits:watch`, `models:watch`,
+`releases:watch` and `docs:llms` are entry points for
 a checkout, and the tools they name stay here - each of them now says in one
 line that it runs from a repository checkout, and exits, rather than failing
 with a module it cannot find. `package.json`'s `exports` names
@@ -1250,7 +1351,8 @@ each other). Change both, and keep them saying the same thing.
 ## What runs this
 
 Every script in `package.json` names `bun`: `bun test` is the suite, and
-`check:gate`, `limits:audit`, `capture`, `limits:sweep` and `limits:watch` are
+`check:gate`, `limits:audit`, `capture`, `limits:sweep`, `limits:watch`,
+`models:watch`, `releases:watch` and `docs:llms` are
 the tools. `bun test` is what CI runs, at the version pinned in
 `.github/workflows/ci.yml` so a run says something about the commit rather than
 about whatever Bun was newest that morning, and `assert-bun-version.mjs` is
