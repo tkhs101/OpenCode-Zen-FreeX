@@ -54,6 +54,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { baseFrom } from "./base-url.mjs";
 import { PROFILES, agentFor } from "./core-tools.mjs";
+import { officialSystemPrompt } from "./official-prompt.mjs";
 import { readBoundedText } from "./limits.mjs";
 import { opencodeID, outboundHeaders, randomProjectID } from "./provider.mjs";
 
@@ -131,12 +132,19 @@ function sessionID() {
 // OpenCode, so it is worth printing: a refusal that arrives with no message at
 // all reads as something other than a stale fingerprint.
 function says(text) {
-  // `{1,120}` rather than `{0,120}`: a quantifier that accepts nothing builds
-  // `": "` out of an empty message, and a detail ending in a colon and a space
-  // reads as a message that was cut off rather than as the absent one it is. A
-  // body with no message at all is the same answer as one with an empty message.
-  const match = text.match(/"message"\s*:\s*"([^"]{1,120})"/);
-  return match ? `: ${match[1]}` : "";
+  // The first 120 characters of what Zen said, cut when the message runs
+  // longer. The original bound required the whole message to fit before it
+  // would quote anything, and that yielded to exactly the wrong body: the
+  // free tier's `FreeUsageLimitError` (2026-10-28, the day the measuring
+  // machine's own quota ran out) says `Free usage limit reached … subscribe
+  // to OpenCode Go` in ~140 characters, the regex matched nothing, and the
+  // one sentence that named the failure was the one sentence the summary
+  // did not show — a bare `HTTP 429` that read as a question about the
+  // fingerprint. The closing quote is now optional, and a cut message says
+  // so with an ellipsis; a body with no message at all is still the same
+  // answer as one with an empty message.
+  const match = text.match(/"message"\s*:\s*"([^"]{1,120})([^"]*)"/);
+  return match ? `: ${match[1]}${match[2] ? "…" : ""}` : "";
 }
 
 // The request a shape is asked with. It is its own function so index.test.mjs
@@ -162,7 +170,19 @@ export function chatRequest({ model, generation, profile, names, maxTokens = 40,
     }),
     body: {
       model,
-      messages: messages ?? [{ role: "user", content: "hi" }],
+      messages: messages ?? [
+        // The official prompt is part of the shape the tier serves. Measured
+        // 2026-10-28: a promptless request — whatever its tools, its ids, its
+        // model or its egress (two IPs agreed) — is refused with the same
+        // `FreeUsageLimitError` 429 a spent quota earns, while the verbatim
+        // replay of a genuine request answers 200 and the same tiny probe
+        // carrying only the system message answers 200 too. A probe without
+        // the prompt therefore reads as a spent bucket, which is the one
+        // wrong thing this gate could tell its reader. The check is new:
+        // promptless probes earned verdicts until at least 2026-10-26.
+        { role: "system", content: officialSystemPrompt(generation, model) },
+        { role: "user", content: "hi" },
+      ],
       // A name in `required` that the profile does not carry is a broken
       // fingerprint, not a request to ask Zen with: without this it is sent as
       // `{"type":"function"}`, Zen refuses it as malformed, and the gate blames

@@ -28,6 +28,7 @@ import plugin, { ZenFreePlugin, id, server } from "./index.mjs";
 import provider from "./provider.mjs";
 import * as coreTools from "./core-tools.mjs";
 import * as models from "./models.mjs";
+import * as catalog from "./catalog.mjs";
 import * as limits from "./limits.mjs";
 import * as stream from "./stream.mjs";
 import * as toolResponse from "./tool-response.mjs";
@@ -87,6 +88,18 @@ check("models.mjs isFree", () => {
   assert.equal(models.isFree("some-model"), false);
 });
 
+// catalog.mjs must load with its snapshot beside it and answer the floor a
+// discovery reads from: the file is an input at run time, and a module that
+// loads but cannot parse the file it ships with is not one a Node host can use.
+check("catalog.mjs", () => {
+  assert.equal(typeof catalog.parseModelsSnapshotDocument, "function");
+  const floor = catalog.bundledModelsSnapshot();
+  assert.equal(typeof floor, "object");
+  assert.ok(Object.keys(floor).length > 0, "the bundled models-observed.json parsed to a non-empty floor");
+  const parsed = catalog.parseModelsSnapshotDocument(JSON.stringify({ version: 1, protocols: floor }));
+  assert.ok(parsed, "the bundled copy is one this build reads whole");
+});
+
 // limits.mjs must load with its snapshot/table intact: the table is the input
 // every host plans from, and a module that imports but cannot answer its own
 // docket of exports is not a module a Node host can use.
@@ -132,7 +145,12 @@ check("tools-smoke.mjs chatRequest", () => {
   assert.equal(request.body.stream, true);
   assert.equal(request.body.max_tokens, 8);
   assert.equal(request.body.tools.length, profile.required.length);
-  assert.equal(request.body.messages[0].role, "user");
+  // The first message is the generation's own system prompt: measured
+  // 2026-10-28, the tier refuses a promptless request with the same
+  // `FreeUsageLimitError` a spent quota earns, so the gate's probe carries
+  // the prompt and its first message reads `system`.
+  assert.equal(request.body.messages[0].role, "system");
+  assert.equal(request.body.messages[1].role, "user");
   assert.equal(request.headers.get("authorization"), "Bearer public");
   assert.match(request.headers.get("user-agent"), /^opencode\//);
 });
