@@ -58,8 +58,8 @@ magpie plugin login opencode-zen-free
 - **只借 OpenCode 的外壳**：请求头、User-Agent、系统提示词与完整工具集合配套为现行的 2.x 一代 OpenCode（1.x 通道已于 2026-10-25 被免费层退役；被退役的通道不是改措辞能救的）。官方提示词放在宿主自己的系统指令之前；正文里已经带着它就不再动，重复整形不会注入两遍。提示词到环境块为止，不点名任何内建 skill——宿主没有 OpenCode 的内建 skill 可加载。请求还必须**从 Bun 运行时发出**，与官方客户端一致：magpie 用自带的 Bun 跑插件，本插件正是借此通过。请求头是刻意挑出的最小集合——**不要自行添加**，两个各自无害的头组合起来也会被拒。
 - **宿主的工具照常运行**：每个工具保留自己的措辞与参数，但以 `clint_` 前缀的名字上路，不会与随后附上的官方工具集合相撞。请求里对它的每一处引用一并改名，回复里的名字再翻译回宿主声明的原名；宿主不会见到自己没声明的名字。OpenCode 自家的工具以采集到的完整形态发送——并且由于官方提示词教的是 Code Mode，提示词后会追加一段 `<system-reminder>`，点名本宿主真正可调的 `clint_` 工具，模型不会开局就调 `execute` 撞上 unknown tool。
 - **工具名对不上就原样交给宿主**：先精确匹配，再忽略大小写，最后忽略 `_`/`-`/`.`/空白，只取唯一结果；对不上或有歧义时不猜、不丢，由宿主回自己的「没有这个工具」，模型据此改名重试。只有没有名字的调用会被略去，并在正文说明。
-- **每个请求自成会话**：每个请求都新铸一枚 OpenCode 形状的会话 id——时间戳取当前时刻，永远落在上游接受的窗口内。Zen 把它对流量的记忆记在会话上，新会话不带旧账。设 `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` 可回到按会话保持（宿主给的 OpenCode 形状 id 原样传，否则从宿主的会话标识派生并记住，同一会话各轮共用一个 id）。
-- **项目 id 也是自己的**：`public` 是全世界共用的凭据、区分不了任何人，所以限额与 key 无关，只能按能区分流量的维度记账——出口 IP 一本总账，其下「项目 id × 出口」各一本小账。出口有余量时，换一枚 id 就是一本新账（2026-10-26 实测）；热门出口的 IP 总账被同一条出口上的全球流量常年烧穿，那时换多少 id 都是同一句 429（2026-10-27 实测：某刚通过准入探测的美国节点，5 千与 3 万 token 的请求连试 10 枚全新 id 全 429——而在探测通过与首次被拒之间的几分钟里，我们自己在该 IP 上只花了约 1 万 token，烧穿它的是同 IP 的世界流量）。宿主给了项目 id 就用它的；没给则每请求随机生成一枚 git-hash 形状的专属 id——旧默认 `global` 是全世界蹭免费插件共享的桶，热门出口上早已被烧光。
+- **一对 id 用一分钟再换，且每个会话各一对**：`x-opencode-project` 与会话 id 是同一对账本的两半，默认一起铸、一起用满 60 秒再一起换——时间戳取当前时刻，永远落在上游接受的窗口内。**窗口是按会话分的**：宿主给的名字（CLI 每个请求都带 `x-opencode-session`）不同，就是不同的一对，两个会话并行也各有各的账；一个会话被拒只换它自己那一对，不牵动别的会话。完全没有名字的请求共用一个槽——认不出差别的请求，服务端也认不出。Zen 把它对流量的记忆记在会话上，所以换对时两半同时换，不会出现「旧会话配新项目」这种自相矛盾的请求。一分钟是刻意的：连串换身份会被整批拒绝（同一出口上各自换新 id 的请求成批被拒，间隔约半秒以上才过），而真实客户端本来就是聊一阵再开下一个会话。`OPENCODE_ZEN_FREE_IDENTITY_TTL_MS` 调这个窗口，`0` 回到每个请求一对新 id（也是量单本账时该用的值——会转的 id 答不了关于某本账的问题）。设 `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` 则回到按会话保持（宿主给的 OpenCode 形状 id 原样传，否则从宿主的会话标识派生并记住，同一会话各轮共用一个 id，永不过期），此时窗口不参与。
+- **项目 id 也是自己的**：`public` 是全世界共用的凭据、区分不了任何人，所以限额与 key 无关，只能按能区分流量的维度记账——出口 IP 一本总账，其下「项目 id × 出口」各一本小账。出口有余量时，换一枚 id 就是一本新账（2026-10-26 实测）；热门出口的 IP 总账被同一条出口上的全球流量常年烧穿，那时换多少 id 都是同一句 429（2026-10-27 实测：某刚通过准入探测的美国节点，5 千与 3 万 token 的请求连试 10 枚全新 id 全 429——而在探测通过与首次被拒之间的几分钟里，我们自己在该 IP 上只花了约 1 万 token，烧穿它的是同 IP 的世界流量）。宿主给了项目 id 就用它的，且永不改写——那是宿主对自己的陈述；没给则按上面的窗口铸一枚 git-hash 形状的专属 id，旧默认 `global` 是全世界蹭免费插件共享的桶，热门出口上早已被烧光。
 - **429 会换一本账再问一次**：宿主遇到 429 会结束整轮并报告额度耗尽，所以插件在把它交出去之前，换一枚没花过的项目 id 与会话 id、把同样的字节再发一次——出口有余量时这就是一本新账；出口总账烧穿时这不是改 id 能救的，重试只是替宿主确认过。默认重试 2 次，首次等 1.2 秒、逐次翻倍（`OPENCODE_ZEN_FREE_RETRY_429=0` 关闭，`OPENCODE_ZEN_FREE_RETRY_WAIT_MS` 与 `OPENCODE_ZEN_FREE_RETRY_WAIT_MAX_MS` 调等待与封顶，都在下一个请求就生效）。默认值刻意偏短：多数宿主身后没有值得等待的东西，总账烧穿后再等只是把同一句拒绝延后；确实有值得等待之物的部署，等待与封顶由它自己定。只重试 429：403 是指纹或出口、426 是版本、5xx 是端点故障，换 id 都救不了；正文点名出口滥用的 429 也不重试，因为没有哪个 id 能救一个被封的出口。宿主自己命名的项目 id 每次都用它——那是宿主对自己的陈述，不该为了绕开限流而改写。重试用尽后交出去的，仍是 Zen 自己那条 429，原样未改。
 - **截断与错误如实报告**：流提前结束时，Chat 流若有内容且无未完成调用，按截断回答收尾并注明；其余情况一律失败。错误正文只读一小段找 Zen 自陈的上限，其余替换为说明。
 
@@ -68,7 +68,7 @@ magpie plugin login opencode-zen-free
 
 **请求头**只有这些：`content-type`、`accept`、`user-agent`、`x-opencode-project`、`x-opencode-session` 与 `x-opencode-session-id`（同一个值）、`x-opencode-client: cli`、`authorization: Bearer public`；走 Messages 时改用 `x-api-key: public` 加 `anthropic-version`。`anthropic-beta` 插件自己从不设置，宿主发了才原样透传。
 
-**会话 id**：默认每请求新铸一枚，下面这些信号一概不读。设了 `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` 时，按顺序取：会话头 `x-opencode-session` / `x-opencode-session-id` / `x-session-affinity` / `x-session-id` / `session_id` / `conversation-id` / `conversation_id`，body 的 `conversation_id`，`metadata.session_id`，或 Claude Code 的 `metadata.user_id` 里的 `_session_<uuid>`。都没有时用 system/instructions 与首条用户消息做种子（system 变了就是另一个会话）；再没有才看 `previous_response_id`，仍然没有则每次新生成。空字符串一律不算名字。
+**会话 id**：默认按窗口铸一枚（`OPENCODE_ZEN_FREE_IDENTITY_TTL_MS`，60 秒），下面这些信号一概不读；窗口结束时与项目 id 一起换掉。`OPENCODE_ZEN_FREE_IDENTITY_TTL_MS=0` 则回到每请求一枚。设了 `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` 时，按顺序取：会话头 `x-opencode-session` / `x-opencode-session-id` / `x-session-affinity` / `x-session-id` / `session_id` / `conversation-id` / `conversation_id`，body 的 `conversation_id`，`metadata.session_id`，或 Claude Code 的 `metadata.user_id` 里的 `_session_<uuid>`。都没有时用 system/instructions 与首条用户消息做种子（system 变了就是另一个会话）；再没有才看 `previous_response_id`，仍然没有则每次新生成。空字符串一律不算名字。
 
 </details>
 
@@ -109,7 +109,8 @@ bun run capture             # 确认差异后才写入
 | 变量 | 作用 |
 | --- | --- |
 | `OPENCODE_ZEN_FREE_DISCOVERY_CACHE` | 模型发现缓存路径；空字符串表示只在内存中 |
-| `OPENCODE_ZEN_FREE_SESSION_AFFINITY` | `1` 恢复按会话保持，不再每请求新铸会话 id |
+| `OPENCODE_ZEN_FREE_SESSION_AFFINITY` | `1` 恢复按会话保持，不再随窗口换会话 id |
+| `OPENCODE_ZEN_FREE_IDENTITY_TTL_MS` | 一对项目 id + 会话 id 用多久再换，默认 `60000`（60 秒）；`0` 回到每请求一对，上限 `86400000` |
 | `OPENCODE_ZEN_FREE_RETRY_429` | 429 的重试次数，默认 `2`；`0` 关闭 |
 | `OPENCODE_ZEN_FREE_RETRY_WAIT_MS` | 首次重试前等待的毫秒数，默认 `1200`，逐次翻倍 |
 | `OPENCODE_ZEN_FREE_RETRY_WAIT_MAX_MS` | 等待封顶，默认 `5000`；默认偏短是刻意的，确有需要的部署自行调高 |

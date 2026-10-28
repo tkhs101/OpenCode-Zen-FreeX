@@ -724,6 +724,36 @@ export function pacingMs(raw = globalThis.process?.env?.[PACING_ENV]) {
   return retrySetting(raw, { min: 0, max: PACING_MAX_MS, fallback: PACING_DEFAULT_MS });
 }
 
+// How long one (project id, session id) pair is kept before it is replaced.
+//
+// The tier ledgers its free quota per project id and egress together, and it
+// files what it thinks of a conversation against the session, so this package
+// has always minted both per request: the most ledgers per unit of traffic, and
+// the least like a client. That last part is what it costs — identity hops in
+// rapid bursts are blanket-refused where the same requests spaced about half a
+// second apart pass (see PACING_ENV), which is a gate reading the hops rather
+// than the bytes. A real client does not do that: it opens a conversation, uses
+// it for a while, and opens another.
+//
+// So the pair is held for a window instead, 60 seconds by default.
+// `OPENCODE_ZEN_FREE_IDENTITY_TTL_MS` sets it, and `0` restores the per-request
+// minting this package shipped with — which is also the value to set when
+// measuring a ledger, because a rotating id cannot answer a question about one
+// id. Read per request, like every setting on this path.
+const IDENTITY_TTL_ENV = "OPENCODE_ZEN_FREE_IDENTITY_TTL_MS";
+const IDENTITY_TTL_DEFAULT_MS = 60_000;
+// A day is longer than any window this tier is known to use, and short enough
+// that a typo cannot pin one identity for a year.
+const IDENTITY_TTL_MAX_MS = 24 * 60 * 60 * 1000;
+
+export function identityTTL(raw = globalThis.process?.env?.[IDENTITY_TTL_ENV]) {
+  return retrySetting(raw, {
+    min: 0,
+    max: IDENTITY_TTL_MAX_MS,
+    fallback: IDENTITY_TTL_DEFAULT_MS,
+  });
+}
+
 // Wait, and stop waiting the moment the caller gives up. A retry is a delay the
 // caller never asked for, so it must not outlive the request: a host that
 // aborted gets its abort back rather than a wait it can no longer use. The timer
@@ -868,8 +898,8 @@ export function opencodeID(prefix, descending, now = Date.now()) {
 // together (a fresh id on a spent exit answered, and a random id on a spent
 // exit answered, both measured 2026-10-26), and nothing is known to read the
 // id beyond its shape. So a host that does not name its project gets one of
-// its own per request: a ledger no other traffic shares, wherever the request
-// lands.
+// its own, held for the window `identityTTL` sets: a ledger no other traffic
+// shares, wherever the request lands.
 export function randomProjectID() {
   return [...randomBytes(20)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
@@ -884,6 +914,62 @@ export function randomProjectID() {
 // this function is for what replaces it.
 export function mintIdentity(now = Date.now()) {
   return { session: opencodeID("ses", true, now), project: randomProjectID() };
+}
+
+// The pair in use per conversation, and when it was minted. In memory only: a
+// restart is a new identity for the same reason a new window is, and a package
+// whose job is to look like the client next to it does not write its
+// bookkeeping to disk.
+//
+// One map entry per conversation, not one pair for the process. A host that
+// runs two conversations at once would otherwise send both under one id, and
+// the tier files what it thinks of traffic against the session: two
+// conversations would share one memory, one window and one refusal. The slot a
+// request is filed under is `conversationKey`, which is the host's own name for
+// the conversation — the header the CLI already sends on every request.
+const LEDGERS = new Map();
+const KEEP_LEDGERS = 1000;
+// The slot a request is filed under when nothing names its conversation. Those
+// requests are indistinguishable to this package, so they are indistinguishable
+// to the tier as well — which is the behaviour this package shipped with, and
+// the reason it is one slot rather than one pair per request: a host whose name
+// for its conversation changes every turn would otherwise mint a pair per turn,
+// which is the hop burst this window exists to avoid.
+const UNNAMED = "";
+
+// The pair this request leaves with: the one its conversation is using while it
+// is younger than the window, a fresh one once it is not. A window of zero makes
+// every call a new pair, which is the per-request minting this package shipped
+// with. A clock that went backwards is treated as an expired window rather than
+// as a pair with time left: an id stamped in the future is one the tier reads as
+// a lie.
+export function currentIdentity(key, now = Date.now()) {
+  const held = LEDGERS.get(key ?? UNNAMED);
+  if (held && now >= held.at && now - held.at < identityTTL()) return held;
+  return rotateIdentity(key, now);
+}
+
+// Replace one conversation's pair now, whatever the window says. A 429 is the
+// tier saying this pair's bucket is spent, so the retry that answers it asks
+// under a new one — and the pair that just answered is the one the next request
+// of that conversation uses, because a ledger proven to answer is worth more
+// than the window it replaces. Only that conversation's slot moves: another
+// conversation's pair is not this refusal's business.
+export function rotateIdentity(key, now = Date.now()) {
+  const slot = key ?? UNNAMED;
+  const fresh = { ...mintIdentity(now), at: now };
+  // Re-inserting moves the slot to the end, so the eviction below drops the
+  // least recently used conversation rather than the oldest one still in use.
+  LEDGERS.delete(slot);
+  LEDGERS.set(slot, fresh);
+  if (LEDGERS.size > KEEP_LEDGERS) LEDGERS.delete(LEDGERS.keys().next().value);
+  return fresh;
+}
+
+// Forget every pair, as a process that has sent nothing would. A test that
+// drives two requests and expects two ledgers needs this; nothing else does.
+export function forgetIdentity() {
+  LEDGERS.clear();
 }
 
 // A session id OpenCode itself could have made: its counter (the low 12 bits,
@@ -985,27 +1071,40 @@ function conversationSeed(body) {
   return JSON.stringify({ system, first });
 }
 
-// A request leaves as its own session: the id is minted fresh on every call,
-// whatever the host sent to name the conversation. The tier keeps what it
-// thinks of traffic against the session — the burn a conversation leaves is
-// charged where the tier files it, and a session that has been refused once is
-// a session the next request answers for. A fresh id per request borrows
-// OpenCode's shape without the ledger: every request arrives as a session the
-// tier has never seen. The timestamp the id embeds is the current time, which
-// is always inside the window the tier accepts — an id dated far from now is
-// answered with the 429 a genuinely exhausted quota returns (measured by
-// opencode2api on 2026-10-25: hash-derived timestamps landed in 1970 and made
-// healthy egresses look blocked, its 9533101).
+// The name a host gives its conversation, if it gives one. The header the CLI
+// sends on every request comes first, then the body's own spellings.
 //
-// `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` hands the conversation back to the
-// ladder below: one session per conversation, kept across turns, for a host
-// that wants the affinity a stable session carries. The knob is read per call,
-// so the host honours it from its next request without a reload.
-export function sessionID(headers, body, options = {}) {
-  if (options.rotate ?? process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY !== "1") {
-    return opencodeID("ses", true);
-  }
-  let signal;
+// A name in the body's metadata is a name only when it is not empty. The guard
+// used to be about the type alone, and an empty string is a string: it was taken
+// as the conversation's name, and every request carrying
+// `metadata: { session_id: "" }` was then keyed by `sha256("ses\0")` — one Zen
+// session for all of them, with its affinity and its quota shared by
+// conversations that have nothing to do with each other. Measured on 2026-10-20:
+// two conversations opening differently answered the same id
+// (ses_ea7d502a1ffe9szowdKaA6Qa5p), which is the one thing the note above this
+// function says must not happen.
+//
+// An empty name is no name, so the request is keyed the way any unnamed one is —
+// by its opening, or by an id of its own when it has none — and not by a key
+// every host that sends an empty name shares. The name is taken whole, not
+// trimmed: a host that spells its conversations differently is naming them
+// differently, and only a name with nothing in it is no name. The conversation
+// id and the Claude Code user id below are names by the same rule: their empty
+// strings are no name either.
+//
+// The body sources are read in the order the free tier's own identity rule reads
+// them — the host's conversation id first, then the metadata name, then the
+// Claude Code user id — and each only where nothing ahead of it named the
+// conversation. A host that sends one of these says it once, so a later turn
+// with a shortened history keeps the identity it already has.
+//
+// The body is the host's to fill in, and the rest of this file reads every value
+// it takes from the host through an optional chain. These did not: `body` itself
+// can be absent or null, and a history can hold an entry that is not a message,
+// so they threw a TypeError before a request was sent — an opaque internal error
+// where a request keyed by no signal belongs. The same reading as every other
+// host value in the file.
+function conversationName(headers, body) {
   for (const name of [
     "x-opencode-session",
     "x-opencode-session-id",
@@ -1015,46 +1114,53 @@ export function sessionID(headers, body, options = {}) {
     "conversation-id",
     "conversation_id",
   ]) {
-    if (headers.get(name)) {
-      signal = headers.get(name);
-      break;
-    }
+    const value = headers.get(name);
+    if (value) return value;
   }
-  // A name in the body's metadata is a name only when it is not empty.
-  // The guard used to be about the type alone, and an empty string is a string:
-  // it was taken as the conversation's name, and every request carrying
-  // `metadata: { session_id: "" }` was then keyed by `sha256("ses\0")` — one Zen
-  // session for all of them, with its affinity and its quota shared by
-  // conversations that have nothing to do with each other. Measured on
-  // 2026-10-20: two conversations opening differently answered the same id
-  // (ses_ea7d502a1ffe9szowdKaA6Qa5p), which is the one thing the note above
-  // this function says must not happen.
-  //
-  // An empty name is no name, so the request is keyed the way any unnamed one
-  // is — by its opening, or by an id of its own when it has none — and not by a
-  // key every host that sends an empty name shares. The name is taken whole,
-  // not trimmed: a host that spells its conversations differently is naming
-  // them differently, and only a name with nothing in it is no name. The
-  // conversation id and the Claude Code user id below are names by the same
-  // rule: their empty strings are no name either.
-  //
-  // The body sources are read in the order the free tier's own identity rule
-  // reads them — the host's conversation id first, then the metadata name,
-  // then the Claude Code user id — and each only where nothing ahead of it
-  // named the conversation. A host that sends one of these says it once, so a
-  // later turn with a shortened history keeps the session it already has.
-  //
-  // The body is the host's to fill in, and the rest of this file reads every
-  // value it takes from the host through an optional chain. These did not:
-  // `body` itself can be absent or null, and a history can hold an entry that
-  // is not a message, so they threw a TypeError before a request was sent —
-  // an opaque internal error where a request keyed by no signal belongs. The
-  // same reading as every other host value in the file.
   if (typeof body?.conversation_id === "string" && body.conversation_id !== "")
-    signal ??= body.conversation_id;
+    return body.conversation_id;
   if (typeof body?.metadata?.session_id === "string" && body.metadata.session_id !== "")
-    signal ??= body.metadata.session_id;
-  signal ??= claudeSessionID(body?.metadata?.user_id);
+    return body.metadata.session_id;
+  return claudeSessionID(body?.metadata?.user_id);
+}
+
+// The slot a conversation's window is filed under: a digest of the host's own
+// name for it, in a key space of its own.
+//
+// Only a name the host gave is used. The opening and `previous_response_id` are
+// deliberately not: the opening moves the moment a host shortens its history,
+// and a Responses continuation id is new on every turn by construction, so
+// either would mint a pair per turn — the hop burst this window exists to avoid.
+// A request that names nothing shares the unnamed slot (`UNNAMED`), which is
+// exactly the single pair this package used before the window existed.
+export function conversationKey(headers, body) {
+  const name = conversationName(headers, body);
+  if (name === undefined) return undefined;
+  return createHash("sha256").update(`sig\0${name}`).digest("hex");
+}
+
+// A request leaves under the pair its conversation holds: one session and one
+// project id for the window `identityTTL` sets, a fresh pair once it is over, and
+// a pair of its own for every conversation the host names. The tier keeps what
+// it thinks of traffic against the session — the burn a conversation leaves is
+// charged where the tier files it, and a session that has been refused once is a
+// session the next request answers for — so the pair is replaced before that
+// memory can be charged twice, and held while it can still be used as the client
+// would use it. The timestamp the id embeds is the current time, which is always
+// inside the window the tier accepts — an id dated far from now is answered with
+// the 429 a genuinely exhausted quota returns (measured by opencode2api on
+// 2026-10-25: hash-derived timestamps landed in 1970 and made healthy egresses
+// look blocked, its 9533101).
+//
+// `OPENCODE_ZEN_FREE_SESSION_AFFINITY=1` hands the conversation back to the
+// ladder below: one session per conversation, kept across turns, for a host
+// that wants the affinity a stable session carries. The knob is read per call,
+// so the host honours it from its next request without a reload.
+export function sessionID(headers, body, options = {}) {
+  if (options.rotate ?? process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY !== "1") {
+    return currentIdentity(options.key ?? conversationKey(headers, body)).session;
+  }
+  const signal = conversationName(headers, body);
   // An id OpenCode itself minted is the conversation's name as it stands: it
   // is already the shape the tier reads, so it is passed through rather than
   // hashed. This was true of the header and metadata sources, and it is true
@@ -1736,7 +1842,19 @@ async function server(_input, options = {}) {
             // prompt carries today's date, and a conversation seed that included
             // it would answer a new Zen session every UTC day for a host that
             // sends no session id of its own.
-            const session = sessionID(given, body);
+            // The conversation this request belongs to, read before the official
+            // prompt is injected: the prompt carries today's date, and a key that
+            // included it would file a new conversation every UTC day for a host
+            // that sends no name of its own.
+            const key = conversationKey(given, body);
+            // The pair that conversation holds, when the window is what decides.
+            // Session affinity is not: a project id rotating under a session the
+            // conversation keeps is exactly the mismatch the tier reads as two
+            // ids disagreeing about the same request, so the ladder owns both
+            // halves then and the window is not consulted.
+            const identity =
+              process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY === "1" ? undefined : currentIdentity(key);
+            const session = identity ? identity.session : sessionID(given, body, { key });
             injectOfficialPrompt(body, protocol, toolPolicy.generation);
             ensureCompletionLimit(body, protocol, toolPolicy.generation);
             // What this request is about to cost the window, read from its own
@@ -1760,18 +1878,17 @@ async function server(_input, options = {}) {
             const namedProject = given.get("x-opencode-project") || undefined;
             const hostProject =
               project?.vcs === "git" && project.id ? project.id : undefined;
-            // The first attempt reuses the session keyed above — under session
-            // affinity that id stands for the conversation and must not move —
-            // and every retry takes a fresh one. Outside affinity (`sessionID`
-            // already minted per request) a fresh id is what `opencodeID` gives,
-            // so the two branches agree and the first attempt is unchanged.
-            //
-            // A retry's fresh ids are minted as one pair (`mintIdentity`), not
-            // as two calls of two clocks: the pair is handed the tier together
-            // and therefore says one thing about when its request happened.
+            // The first attempt reuses the pair keyed above — under session
+            // affinity that session stands for the conversation and must not
+            // move — and every retry replaces it wholesale. A retry's fresh ids
+            // are minted as one pair (`mintIdentity`, through `rotateIdentity`),
+            // not as two calls of two clocks: the pair is handed the tier
+            // together and therefore says one thing about when its request
+            // happened. `rotateIdentity` also makes that pair the window's, so
+            // the ledger that just answered is the one the next request uses.
             let attempts = 0;
             const attemptHeaders = () => {
-              const fresh = attempts === 0 ? undefined : mintIdentity();
+              const fresh = attempts === 0 ? undefined : rotateIdentity(key);
               return outboundHeaders({
                 // The tier files what it thinks of this traffic against the
                 // session, and a session that was refused once is a session the
@@ -1794,10 +1911,11 @@ async function server(_input, options = {}) {
                   // pre-burned — a popular exit once answered 429 twenty-one
                   // seconds after this deployment first used it. A host that
                   // names its project
-                  // keeps its own name; one that does not gets an id of its
-                  // own for the request, in the git-hash shape the CLI sends.
+                  // keeps its own name; one that does not gets the window's
+                  // id (or, under affinity, one of its own per attempt), in the
+                  // git-hash shape the CLI sends.
                   hostProject ||
-                  (attempts === 0 ? randomProjectID() : fresh.project),
+                  (attempts === 0 ? (identity ? identity.project : randomProjectID()) : fresh.project),
               });
             };
             // The bytes are the same on every attempt — the body was shaped once

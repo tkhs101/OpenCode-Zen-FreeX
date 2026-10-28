@@ -937,7 +937,7 @@ project id as one conversation in one project, so a retry replaces both halves
 together (`mintIdentity` in `provider.mjs`), from one reading of the clock, and
 the pair's ids that replace each other are a pair that says one thing. The
 first attempt keeps `sessionID`'s answer: under affinity that id IS the
-conversation, and outside it the id minted per request is already the pair's
+conversation, and outside it the window's pair is already the first attempt's
 own half.
 
 ## The watchers
@@ -1016,10 +1016,11 @@ x-opencode-request with x-session-affinity is refused. A header cannot be judged
 by adding it on its own, so add it in `outboundHeaders` and let the pinned test
 and a live `check:gate` say what it did.
 
-**Reading the session name.** The default mints a fresh `ses_` id per request
-and reads none of what follows: the tier keeps what it thinks of traffic
-against the session, and a request that arrives as a session the tier has never
-seen carries none of it. The mint is `opencodeID`, whose timestamp is the
+**Reading the session name.** The default holds one `ses_` id for the window
+`OPENCODE_ZEN_FREE_IDENTITY_TTL_MS` sets — a fresh pair at each window's start
+— and reads none of what follows: the tier keeps what it thinks of traffic
+against the session, and a session minted at the start of a window carries none
+of the memory the one before it left. The mint is `opencodeID`, whose timestamp is the
 current moment — the one constraint that matters, because the tier decodes the
 timestamp and answers an id dated far from now with the same 429 a genuinely
 exhausted quota returns (measured by opencode2api on 2026-10-25: hash-derived
@@ -1133,7 +1134,7 @@ traffic carries, so its buckets on popular exits arrive pre-burned: that is
 how a popular exit answered 429 twenty-one seconds after this deployment first
 used it (2026-10-25, Miami). A host that names its project — by header or with a
 git one magpie hands over — keeps its own name; a host that does not gets a
-git-hash-shaped id of its own per request (`randomProjectID` in
+git-hash-shaped id of its own, held for the window above (`randomProjectID` in
 `provider.mjs`), a ledger no other traffic shares wherever the request lands.
 The gate probes the same way (`tools-smoke.mjs`), or it would report a
 wording refusal where the truth is a spent `global` bucket. Nothing is known
@@ -1169,9 +1170,48 @@ it; ~115k-token requests at
 id-level total cap exists it is larger than that, or the ledger refills at
 least that fast — so in practice the egress budget is almost always the one
 that answers first, and after a 429 the project and session ids do not need
-changing, only the egress does. (The plugin still mints fresh ones per
-request: that costs nothing and covers the case the measurements could not
-reach.)
+changing, only the egress does.
+
+**That bound is now in doubt.** On 2026-10-28 an operator reported a spent
+tier answering again after the local state was wiped (a new project id) *and*
+the egress replaced. The two-budget model above does not predict that: a fresh
+egress is already a fresh (id, egress) pair, so the wipe should have bought
+nothing. Either the wipe was not what recovered it and the fresh egress was,
+or an id-level budget exists that the 15M run never reached — the run above
+bounds that cap from below, it does not rule one out. One experiment tells the
+two apart: change only the egress and keep the id. Until that is run, treat
+the 15M bound as the floor of an unmeasured quantity rather than as a
+statement that no id-level cap exists.
+
+**One pair, held for a window, one per conversation.** The pair is no longer
+minted per request. `currentIdentity` keeps one (project id, session id) pair
+per conversation for `OPENCODE_ZEN_FREE_IDENTITY_TTL_MS` — 60 seconds by
+default — and replaces both halves together when the window ends; a retry still
+replaces it at once (`rotateIdentity`), and the pair that answered becomes that
+conversation's window, because a ledger proven to answer is worth more than the
+one it replaced. The slot is `conversationKey`: a digest of the host's own name
+for the conversation, read by the same ladder `sessionID` walks (the session
+header the CLI sends on every request, then the body's `conversation_id`,
+`metadata.session_id` or Claude Code user id). The name is never sent — only the
+pair minted for it — so keying by it costs nothing at the tier and keeps two
+conversations from sharing one session, one memory and one refusal. The opening
+and `previous_response_id` are deliberately not names: the opening moves when a
+host shortens its history and a continuation id is new on every turn, so keyed
+by either a conversation would answer a new pair every turn — the hop burst the
+window exists to avoid, arrived at by accident. A request that names nothing
+shares the unnamed slot, which is the single pair this package used before the
+window existed.
+
+The reason for the window is the one the pacing setting already records: a burst
+of requests that each hop to a fresh identity is refused as a batch while the
+same requests spaced about half a second apart pass, so a client that appears as
+a hundred strangers in a minute is a client the gate has an opinion about.
+Holding a pair is also the shape a real client has — it opens a conversation,
+uses it for a while, opens another. `0` restores per-request minting, which is
+the value to measure a ledger with: an id that rotates cannot answer a question
+about one id. Session affinity still owns both halves when it is set, and a
+project id the host named is never re-minted; the window is this package's own
+bookkeeping and moves only what this package minted.
 
 **Handing a 429 on when a new ledger would have answered.** The 2026-10-26
 measurement above is the whole reason the retry exists: a spent bucket is

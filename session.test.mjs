@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mintIdentity, opencodeID, realSessionID, sessionID } from "./provider.mjs";
+import {
+  conversationKey,
+  currentIdentity,
+  forgetIdentity,
+  identityTTL,
+  mintIdentity,
+  opencodeID,
+  realSessionID,
+  rotateIdentity,
+  sessionID,
+} from "./provider.mjs";
 
 // This file pins the affinity ladder — how a conversation is named, and how one
 // name keeps one session across its turns. The package engages that ladder only
@@ -79,17 +89,26 @@ test("one conversation keeps one session, another gets its own", () => {
   assert.equal(signaled, sessionID(new Headers({ "conversation-id": "conversation-d" }), {}));
 });
 
-test("a request with no signal and no user message gets an id of its own, not a shared one", () => {
-  // Nothing to key a conversation by: the id cannot be kept for a next turn, so
-  // it is minted fresh — and it must still be the shape Zen checks rather than a
-  // bare made-up value. Two of them differ, which is the half a name like "one
-  // id, not a new one a turn" got wrong: a single constant here would fold every
-  // such request into whichever conversation happened to arrive first.
-  const first = sessionID(new Headers(), {});
-  const second = sessionID(new Headers(), {});
-  assert.ok(realSessionID(first), first);
-  assert.ok(realSessionID(second), second);
-  assert.notEqual(first, second, "nothing names this conversation, so nothing may be shared");
+test("with the window off, a request with no signal and no user message gets an id of its own", () => {
+  // Nothing to key a conversation by, so with the window off the id cannot be
+  // kept for a next turn and is minted fresh — and it must still be the shape
+  // Zen checks rather than a bare made-up value. Two of them differ, which is
+  // the half a name like "one id, not a new one a turn" got wrong: a single
+  // constant here would fold every such request into whichever conversation
+  // happened to arrive first. The window is the one thing allowed to share an
+  // id between two such requests, and it is off here (see the window cases).
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "0";
+  try {
+    const first = sessionID(new Headers(), {});
+    const second = sessionID(new Headers(), {});
+    assert.ok(realSessionID(first), first);
+    assert.ok(realSessionID(second), second);
+    assert.notEqual(first, second, "nothing names this conversation, so nothing may be shared");
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
+  }
 });
 
 test("OpenCode's own session id is passed through, a hash cut to its shape is not", () => {
@@ -618,42 +637,64 @@ test("an empty alias changes nothing about how a request is keyed", () => {
   );
 });
 
-test("the default is a fresh session on every request, whatever names the conversation", () => {
-  const before = Date.now();
-  const headers = new Headers({ "x-session-id": "conversation-one" });
-  const body = { messages: [{ role: "user", content: "hi" }] };
-  const first = sessionID(headers, body, { rotate: true });
-  const second = sessionID(headers, body, { rotate: true });
-  assert.notEqual(first, second, "two requests are two sessions");
-  const after = Date.now();
-  for (const id of [first, second]) {
-    assert.match(id, SHAPE);
-    const { time } = decode(id, true);
-    // The time field wraps every 2^36 ms, so the range check holds the
-    // elapsed offset, exactly as the minted-id test above does.
-    const elapsed = ((time - before) % WRAP + WRAP) % WRAP;
-    assert.ok(elapsed <= after - before, `${id} carries the time it was made`);
+test("with the window off, every request is a fresh session, whatever names the conversation", () => {
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "0";
+  try {
+    const before = Date.now();
+    const headers = new Headers({ "x-session-id": "conversation-one" });
+    const body = { messages: [{ role: "user", content: "hi" }] };
+    const first = sessionID(headers, body, { rotate: true });
+    const second = sessionID(headers, body, { rotate: true });
+    assert.notEqual(first, second, "two requests are two sessions");
+    const after = Date.now();
+    for (const id of [first, second]) {
+      assert.match(id, SHAPE);
+      const { time } = decode(id, true);
+      // The time field wraps every 2^36 ms, so the range check holds the
+      // elapsed offset, exactly as the minted-id test above does.
+      const elapsed = ((time - before) % WRAP + WRAP) % WRAP;
+      assert.ok(elapsed <= after - before, `${id} carries the time it was made`);
+    }
+    // A name the host sends — even an id OpenCode itself minted — does not hold
+    // the request to that session: rotation reads no signal, by design, so a
+    // conversation the tier has already judged cannot be landed back on it.
+    const official = opencodeID("ses", true);
+    assert.notEqual(
+      sessionID(new Headers({ "x-opencode-session": official }), body, { rotate: true }),
+      official,
+      "an official id does not survive rotation",
+    );
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
   }
-  // A name the host sends — even an id OpenCode itself minted — does not hold
-  // the request to that session: rotation reads no signal, by design, so a
-  // conversation the tier has already judged cannot be landed back on it.
-  const official = opencodeID("ses", true);
-  assert.notEqual(
-    sessionID(new Headers({ "x-opencode-session": official }), body, { rotate: true }),
-    official,
-    "an official id does not survive rotation",
-  );
 });
 
 test("OPENCODE_ZEN_FREE_SESSION_AFFINITY=1 is what puts the ladder in charge", () => {
   const saved = process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY;
+  const savedTTL = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
   try {
     delete process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY;
     const headers = new Headers({ "x-session-id": "conversation-one" });
     const body = { messages: [{ role: "user", content: "hi" }] };
-    const first = sessionID(headers, body);
-    const second = sessionID(headers, body);
-    assert.notEqual(first, second, "with the knob unset, every request mints its own");
+    // With the knob unset the window decides: two requests inside it are one
+    // session, and a window of zero is what makes them two again. Neither reads
+    // the name the host sent, which is the half this case has always pinned.
+    forgetIdentity();
+    assert.equal(
+      sessionID(headers, body),
+      sessionID(headers, body),
+      "with the knob unset, the window's session is kept",
+    );
+    process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "0";
+    assert.notEqual(
+      sessionID(headers, body),
+      sessionID(headers, body),
+      "a window of zero mints per request again",
+    );
+    if (savedTTL === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = savedTTL;
     process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY = "1";
     assert.equal(
       sessionID(headers, body),
@@ -667,6 +708,8 @@ test("OPENCODE_ZEN_FREE_SESSION_AFFINITY=1 is what puts the ladder in charge", (
   } finally {
     if (saved === undefined) delete process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY;
     else process.env.OPENCODE_ZEN_FREE_SESSION_AFFINITY = saved;
+    if (savedTTL === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = savedTTL;
   }
 });
 
@@ -697,4 +740,190 @@ test("a replacement ledger is minted as one pair", async () => {
   const other = mintIdentity(now);
   assert.notEqual(stamped.session, other.session);
   assert.notEqual(stamped.project, other.project);
+});
+
+// The window: one pair is used for as long as it is younger than the setting,
+// and replaced when it is not. This is the shape a client has — a conversation
+// that lasts a minute, then another — and the reason it exists is that identity
+// hops in rapid bursts are blanket-refused where the same requests spaced about
+// half a second apart pass (see PACING_ENV in provider.mjs). The clock is handed
+// in rather than waited on, so the boundary is tested and not slept through.
+test("one pair is used for the window and replaced when it ends", () => {
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "60000";
+  try {
+    forgetIdentity();
+    const minted = currentIdentity(undefined, 1_000_000);
+    assert.ok(realSessionID(minted.session), minted.session);
+    assert.match(minted.project, /^[0-9a-f]{40}$/);
+    // The last millisecond of the window still belongs to it.
+    const last = currentIdentity(undefined, 1_000_000 + 59_999);
+    assert.equal(last.session, minted.session, "the session holds to the end of its window");
+    assert.equal(last.project, minted.project, "and so does the project id");
+    // The next millisecond is a new pair, both halves at once.
+    const next = currentIdentity(undefined, 1_000_000 + 60_000);
+    assert.notEqual(next.session, minted.session, "a window that ended mints a new session");
+    assert.notEqual(next.project, minted.project, "and a new project id");
+    assert.equal(currentIdentity(undefined, 1_000_000 + 60_000).session, next.session, "the new pair is the one kept");
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
+  }
+});
+
+// A window of zero is the per-request minting this package shipped with, and the
+// value to set when measuring one ledger — a rotating id cannot answer a
+// question about one id.
+test("a window of zero mints a pair per call", () => {
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "0";
+  try {
+    forgetIdentity();
+    const first = currentIdentity(undefined, 1_000_000);
+    const second = currentIdentity(undefined, 1_000_000);
+    assert.notEqual(first.session, second.session, "two calls, two sessions");
+    assert.notEqual(first.project, second.project, "two calls, two project ids");
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
+  }
+});
+
+// A clock that went backwards is an expired window, not a pair with time left: an
+// id stamped in the future is one the tier reads as a lie, and the shape check it
+// applies to a session id is the same one that made hash-derived timestamps in
+// 1970 look like an exhausted quota.
+test("a clock that went backwards ends the window", () => {
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "60000";
+  try {
+    forgetIdentity();
+    const minted = currentIdentity(undefined, 1_000_000);
+    const backwards = currentIdentity(undefined, 1_000_000 - 1);
+    assert.notEqual(backwards.session, minted.session);
+    assert.notEqual(backwards.project, minted.project);
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
+  }
+});
+
+// A 429 replaces the pair whatever the window says, and the replacement becomes
+// the window's: the ledger that just answered is worth more than the one it
+// replaced, and going back to a spent pair on the next request would be asking
+// the bucket that refused it.
+test("a retry's pair becomes the one the window keeps", () => {
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "60000";
+  try {
+    forgetIdentity();
+    const first = currentIdentity(undefined, 1_000_000);
+    const retried = rotateIdentity(undefined, 1_000_000 + 1_000);
+    assert.notEqual(retried.session, first.session, "the retry mints a new session");
+    assert.notEqual(retried.project, first.project, "and a new project id");
+    assert.equal(
+      currentIdentity(undefined, 1_000_000 + 2_000).session,
+      retried.session,
+      "the pair that answered is the one the next request uses",
+    );
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
+  }
+});
+
+// The setting is read like every other one on this path: a whole number of
+// milliseconds, a documented off switch at zero, and the default for anything
+// that is not one.
+test("the window setting is bounded, with zero as its off switch", () => {
+  assert.equal(identityTTL(undefined), 60_000, "unset is a minute");
+  assert.equal(identityTTL(""), 60_000, "empty is unset");
+  assert.equal(identityTTL("0"), 0, "zero is the off switch, not a typo");
+  assert.equal(identityTTL("1500"), 1500, "a short window is a window");
+  assert.equal(identityTTL("86400000"), 86_400_000, "a day is the ceiling");
+  assert.equal(identityTTL("86400001"), 60_000, "beyond it is not a window");
+  assert.equal(identityTTL("-1"), 60_000, "negative is not a window");
+  assert.equal(identityTTL("1.5"), 60_000, "a fraction is not a window");
+  assert.equal(identityTTL("soon"), 60_000, "a word is not a window");
+});
+
+// One pair per conversation, not one pair per process. A host that runs two
+// conversations at once would otherwise send both under one id, and the tier
+// files what it thinks of traffic against the session: two conversations would
+// share one memory, one window and one refusal.
+test("each conversation holds a window of its own", () => {
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "60000";
+  try {
+    forgetIdentity();
+    const one = conversationKey(new Headers({ "x-opencode-session": "conversation-one" }), {});
+    const two = conversationKey(new Headers({ "x-opencode-session": "conversation-two" }), {});
+    assert.notEqual(one, two, "two names are two keys");
+    const a = currentIdentity(one, 1_000_000);
+    const b = currentIdentity(two, 1_000_000);
+    assert.notEqual(a.session, b.session, "and two pairs");
+    assert.notEqual(a.project, b.project);
+    // Each keeps its own across turns, and the other's activity does not move it.
+    assert.equal(currentIdentity(one, 1_000_000 + 30_000).session, a.session);
+    assert.equal(currentIdentity(two, 1_000_000 + 30_000).session, b.session);
+    // A refusal is one conversation's business: rotating one leaves the other.
+    const rotated = rotateIdentity(one, 1_000_000 + 40_000);
+    assert.notEqual(rotated.session, a.session);
+    assert.equal(
+      currentIdentity(two, 1_000_000 + 40_000).session,
+      b.session,
+      "another conversation's pair is not this refusal's business",
+    );
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
+  }
+});
+
+// A request that names nothing has no key, so it shares the unnamed slot — the
+// single pair this package used before the window existed. That is the limit of
+// what can be told apart: two requests nothing names are two requests nothing
+// can tell apart, and a pair per request would be the hop burst this window
+// exists to avoid.
+test("requests that name nothing share one slot", () => {
+  const held = process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+  process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = "60000";
+  try {
+    forgetIdentity();
+    assert.equal(conversationKey(new Headers(), {}), undefined, "no header, no name");
+    const first = currentIdentity(undefined, 1_000_000);
+    const second = currentIdentity(undefined, 1_000_000 + 1_000);
+    assert.equal(second.session, first.session);
+    assert.equal(second.project, first.project);
+  } finally {
+    if (held === undefined) delete process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS;
+    else process.env.OPENCODE_ZEN_FREE_IDENTITY_TTL_MS = held;
+  }
+});
+
+// The key is a name the host gave, never something read out of the content. An
+// opening moves the moment a host shortens its history, and a Responses
+// continuation id is new on every turn by construction; keyed by either, a
+// conversation would answer a new pair every turn — the hop burst the window
+// exists to avoid, arrived at by accident.
+test("the opening and the continuation id are not names", () => {
+  const opening = { messages: [{ role: "user", content: "hi" }] };
+  assert.equal(conversationKey(new Headers(), opening), undefined, "an opening is not a name");
+  assert.equal(
+    conversationKey(new Headers(), { previous_response_id: "resp_123" }),
+    undefined,
+    "a continuation id is not a name",
+  );
+  // The names the host does give are read, and read in the ladder's order.
+  const named = new Headers({ "x-session-id": "conversation-x" });
+  assert.equal(
+    conversationKey(named, { ...opening, conversation_id: "conversation-y" }),
+    conversationKey(named, opening),
+    "the header wins over the body, as it does in the ladder",
+  );
+  assert.equal(
+    conversationKey(new Headers(), { ...opening, metadata: { session_id: "conversation-z" } }),
+    conversationKey(new Headers({ "session_id": "conversation-z" }), {}),
+    "the same name is the same key wherever it was spelled",
+  );
 });

@@ -14,6 +14,7 @@ import {
   officialToolNames,
 } from "./official-tools.mjs";
 import { OPENCODE_PROMPT_MARKER, OPENCODE_PROMPT_MARKER_V2 } from "./official-prompt.mjs";
+import { forgetIdentity } from "./provider.mjs";
 import { readDiscoveryCache, writeDiscoveryCache } from "./models.mjs";
 import { clearInstalledSnapshot, snapshotState } from "./limits.mjs";
 import { protocols, declaredTools, toolReply } from "./tool-fixtures.mjs";
@@ -39,6 +40,18 @@ process.env.OPENCODE_ZEN_FREE_LIMITS_SNAPSHOT_URL = "";
 // carry one extra fetch and one more floor through every assertion about a
 // discovery round. The cases about it pass an explicit URL of their own.
 process.env.OPENCODE_ZEN_FREE_MODELS_SNAPSHOT_URL = "";
+
+// Set a setting for one case and put the operator's value back afterwards. Every
+// setting on this path is read per request, so a case changes one for its own
+// duration without a reload.
+function envFor(t, name, value) {
+  const held = process.env[name];
+  process.env[name] = value;
+  t.after(() => {
+    if (held === undefined) delete process.env[name];
+    else process.env[name] = held;
+  });
+}
 
 // The names the discovery reads are counted by. Zen's own list is also the
 // endpoint the fixture's `models` handler answers, so the three are named here
@@ -721,7 +734,8 @@ for (const [input, supplied, expected, label] of [
       // (measured 2026-10-26), and the old default `global` was shared by
       // every freeriding plugin user — its buckets on popular exits arrived
       // pre-burned. A host that names no project gets a git-hash-shaped id of
-      // its own per request, so its ledger is nobody else's.
+      // its own, held for the window `identityTTL` sets and replaced when that
+      // window ends, so its ledger is nobody else's.
       const first = lastCall(state).headers["x-opencode-project"];
       assert.match(first, expected);
       const again = await loader.fetch(`${origin}/v1/chat/completions`, {
@@ -730,13 +744,148 @@ for (const [input, supplied, expected, label] of [
       });
       await again.text();
       assert.match(lastCall(state).headers["x-opencode-project"], expected);
-      assert.notEqual(lastCall(state).headers["x-opencode-project"], first, "two requests are two project ids");
+      assert.equal(
+        lastCall(state).headers["x-opencode-project"],
+        first,
+        "two requests inside one window are one project id",
+      );
+      // A window that ended is a new ledger. Forgetting the pair is that fact
+      // without waiting a minute for it.
+      forgetIdentity();
+      const later = await loader.fetch(`${origin}/v1/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify({ model: "chat-free", stream: true }),
+      });
+      await later.text();
+      assert.notEqual(
+        lastCall(state).headers["x-opencode-project"],
+        first,
+        "a new window is a new project id",
+      );
     } else {
       assert.equal(lastCall(state).headers["x-opencode-project"], expected);
     }
     assert.equal(lastCall(state).headers["user-agent"], agentOf("2.x"));
   });
 }
+
+// One window, one pair: a host's consecutive requests arrive as one client that
+// has been talking for a while rather than as a burst of strangers. The window
+// is the shape a real client has, and the reason it exists is that identity hops
+// in rapid bursts are blanket-refused where the same requests spaced about half
+// a second apart pass (see PACING_ENV in provider.mjs).
+test("two requests inside the window share one session and one project id", async (t) => {
+  forgetIdentity();
+  const { plugin, state, origin } = await fixture(t);
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  const send = () =>
+    loader.fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: "chat-free", messages: [{ role: "user", content: "hello" }] }),
+    });
+  await (await send()).text();
+  await (await send()).text();
+  const [first, second] = state.calls.filter((call) => call.url === "/v1/chat/completions");
+  assert.equal(
+    second.headers["x-opencode-session"],
+    first.headers["x-opencode-session"],
+    "one session for the window",
+  );
+  assert.equal(
+    second.headers["x-opencode-project"],
+    first.headers["x-opencode-project"],
+    "one project id for the window",
+  );
+});
+
+// The window is per conversation, not per process: two conversations running at
+// once must not share one id, or the tier files both against one session and one
+// refusal ends both. The name is the header the CLI already sends on every
+// request, so nothing has to be configured for this.
+test("two conversations hold a pair each inside one window", async (t) => {
+  forgetIdentity();
+  const { plugin, state, origin } = await fixture(t);
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  const send = (conversation) =>
+    loader.fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "x-session-id": conversation },
+      body: JSON.stringify({ model: "chat-free", messages: [{ role: "user", content: "hello" }] }),
+    });
+  await (await send("conversation-one")).text();
+  await (await send("conversation-two")).text();
+  await (await send("conversation-one")).text();
+  const [first, second, again] = state.calls.filter((call) => call.url === "/v1/chat/completions");
+  assert.equal(
+    again.headers["x-opencode-session"],
+    first.headers["x-opencode-session"],
+    "a conversation keeps the pair its window gave it",
+  );
+  assert.equal(again.headers["x-opencode-project"], first.headers["x-opencode-project"]);
+  assert.notEqual(
+    second.headers["x-opencode-session"],
+    first.headers["x-opencode-session"],
+    "another conversation gets a pair of its own",
+  );
+  assert.notEqual(second.headers["x-opencode-project"], first.headers["x-opencode-project"]);
+});
+
+// The retry is the one pair the window must not keep: the tier has just said the
+// old one is spent. What it mints replaces the window's, because the pair that
+// answered is worth more than the one it replaced — and going back to the spent
+// one on the next request would be asking the bucket that just refused it.
+test("the pair a retry minted is the one the next request uses", async (t) => {
+  forgetIdentity();
+  const { plugin, state, origin } = await fixture(t);
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  const send = () =>
+    loader.fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      body: JSON.stringify({ model: "chat-free", messages: [{ role: "user", content: "hello" }] }),
+    });
+  state.statuses = [429, 200];
+  const answered = await send();
+  assert.equal(answered.status, 200);
+  await answered.text();
+  const retried = lastCall(state).headers;
+  await (await send()).text();
+  const next = lastCall(state).headers;
+  assert.equal(
+    next["x-opencode-session"],
+    retried["x-opencode-session"],
+    "the session that answered is the window's session now",
+  );
+  assert.equal(
+    next["x-opencode-project"],
+    retried["x-opencode-project"],
+    "and the project id that answered is the window's too",
+  );
+});
+
+// A name the host sends is the host's statement about itself, and the window is
+// this package's own bookkeeping: the window moves, the host's name does not.
+test("a host-named project id survives the window while the session rotates", async (t) => {
+  forgetIdentity();
+  const { plugin, state, origin } = await fixture(t);
+  await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
+  const loader = await plugin.auth.loader(publicAuth);
+  const send = () =>
+    loader.fetch(`${origin}/v1/chat/completions`, {
+      method: "POST",
+      headers: { "x-opencode-project": "host-named-project" },
+      body: JSON.stringify({ model: "chat-free", messages: [{ role: "user", content: "hello" }] }),
+    });
+  await (await send()).text();
+  const first = lastCall(state).headers;
+  forgetIdentity();
+  await (await send()).text();
+  const second = lastCall(state).headers;
+  assert.equal(second["x-opencode-project"], "host-named-project", "the host's name is kept");
+  assert.notEqual(second["x-opencode-session"], first["x-opencode-session"], "the window's session is not");
+});
 
 // The headers OpenCode's release binary sends to opencode.ai/zen/v1, captured
 // on each protocol: these and no others, whatever the caller sent. The
@@ -902,6 +1051,11 @@ test("partial discovery never restores a model explicitly changed to SystemOne",
 // version this replaces was described as making. What is asserted here is the
 // contract at the wire, where the id that actually reaches Zen is what matters.
 test("two conversations opening the same way keep separate Zen sessions", async (t) => {
+  // The window is what shares a pair between two requests now, and that is the
+  // point of it; what this case pins is the fallback that runs when nothing is
+  // held — the seed logic must not fold two conversations by their opening for
+  // a deployment that turns the window off.
+  envFor(t, "OPENCODE_ZEN_FREE_IDENTITY_TTL_MS", "0");
   const { plugin, state, origin } = await fixture(t);
   await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
   const loader = await plugin.auth.loader(publicAuth);
@@ -936,6 +1090,9 @@ test("two conversations opening the same way keep separate Zen sessions", async 
 // conversations with its affinity and quota between them. Each one is now given
 // an id of its own, as any body with no opening is.
 test("two bodies that open with nothing keep separate Zen sessions", async (t) => {
+  // Same reason as the case above: a window that is off is a window that shares
+  // nothing, and the seed logic still has to tell these two apart.
+  envFor(t, "OPENCODE_ZEN_FREE_IDENTITY_TTL_MS", "0");
   const { plugin, state, origin } = await fixture(t);
   await plugin.provider.models({ models: {} }, { auth: await publicAuth() });
   const loader = await plugin.auth.loader(publicAuth);
