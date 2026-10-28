@@ -52,7 +52,10 @@ const V2 = readPrompt(PROMPT_V2, "2.x");
 // that read it on 2026-10-25 called the official `skill` tool for that name
 // twice — DeepSeek Harness answered `skill "customize-opencode" is unknown or
 // no longer available`, because the skill does not exist outside OpenCode. The
-// listing is not part of the shape Zen is known to read: opencode2api's
+// 2.2.0 capture of 2026-10-28 carries the same kind of block, listing the
+// built-ins `opencode` and `report`, and it is stripped for the same reason:
+// whatever the CLI ships in its own install, a magpie host has none of it.
+// The listing is not part of the shape Zen is known to read: opencode2api's
 // field-deployed prompts end at `</env>` with no skills named. An advertised
 // skill is a call waiting to happen, and there is no tool behind it here.
 

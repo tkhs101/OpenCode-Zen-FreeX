@@ -770,7 +770,13 @@ if (entry) {
   const { code, ran } = await capture(
     `listening on 127.0.0.1:${PORT}, running opencode against it`,
     () =>
-      spawn("opencode", ["run", "-m", "opencode/big-pickle", "Say OK."], {
+      // `--standalone` is what makes a desktop-built CLI run its own server
+      // instead of looking for the desktop service to attach to. Measured
+      // 2026-10-28 against 2.2.0: without it the run printed its banner and
+      // exited without a request ever reaching this port; with it, the request
+      // arrives. The stock CLI ignores the flag; `mini-capture.mjs`, the
+      // desktop-driven capture this file predates, has always passed it.
+      spawn("opencode", ["run", "--standalone", "-m", "opencode/big-pickle", "Say OK."], {
         env: {
           ...process.env,
           XDG_DATA_HOME: join(home, "data"),

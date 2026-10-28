@@ -1317,8 +1317,16 @@ test(
     const { writeSnapshot } = await subject;
     const file = join(tmpdir(), `zen-status-${process.pid}-stale-${Date.now()}.json`);
     const script = fileURLToPath(new URL("./limits-watch.mjs", import.meta.url));
+    // The row this case writes is measured today, computed rather than taken
+    // from `goodRow`: the child below reads the real clock, and a date written
+    // into the source went stale on 2026-10-28 — the day the 2026-10-20
+    // `goodRow` carries crossed the week the row-freshness check allows, and a
+    // run that was green the day before failed on a constant. The pinned-clock
+    // cases above keep the shared row; this one cannot pin its child's clock,
+    // so it names its own day.
+    const today = new Date().toISOString().slice(0, 10);
     try {
-      await writeSnapshot({ models: { "a-free": goodRow } }, file);
+      await writeSnapshot({ models: { "a-free": { ...goodRow, at: today } } }, file);
       const past = new Date(Date.now() - 180_000);
       utimesSync(file, past, past);
       const run = spawnSync(process.execPath, [script, "--status", "--json", "--stale-after", "60", file], {
